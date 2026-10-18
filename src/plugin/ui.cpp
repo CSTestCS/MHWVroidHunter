@@ -307,18 +307,26 @@ void drawSettingsUI(bool standalone) {
 void drawStartupHint() {
     static const auto start = std::chrono::steady_clock::now();
     float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
-    if (t > 12.0f) return;
+    if (t > 25.0f) return;
     ImGui::SetNextWindowPos(ImVec2(20, 20));
     ImGui::SetNextWindowBgAlpha(0.6f);
     ImGui::Begin("##vhhint", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
                      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
     int hk;
+    std::string status;
     {
         std::lock_guard<std::mutex> lk(app().mutex);
         hk = app().settings.hotkey;
+        status = app().status;
     }
     ImGui::Text("VRoid Hunter loaded - press F%d for settings", hk >= VK_F1 && hk <= VK_F12 ? hk - VK_F1 + 1 : 7);
+    // result of the start-up conversion, so problems are visible without opening the menu
+    const bool failed = status.rfind("Failed", 0) == 0 || status.find("Could not") != std::string::npos;
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 40.0f);
+    if (failed) ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%s", status.c_str());
+    else ImGui::TextUnformatted(status.c_str());
+    ImGui::PopTextWrapPos();
     ImGui::End();
 }
 

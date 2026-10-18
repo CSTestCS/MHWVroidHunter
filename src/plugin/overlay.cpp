@@ -19,8 +19,8 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 namespace vhp {
 
-std::mutex& imguiMutex() {
-    static std::mutex m;
+std::recursive_mutex& imguiMutex() {
+    static std::recursive_mutex m;
     return m;
 }
 
@@ -61,7 +61,7 @@ bool isInputMessage(UINT msg) {
 
 LRESULT CALLBACK hookedWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (app().menuVisible && g_overlayCtx) {
-        std::lock_guard<std::mutex> lk(imguiMutex());
+        std::lock_guard<std::recursive_mutex> lk(imguiMutex());
         ImGui::SetCurrentContext(g_overlayCtx);
         ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp);
         ImGuiIO& io = ImGui::GetIO();
@@ -81,7 +81,7 @@ void initOverlay(IDXGISwapChain* sc) {
     sc->GetDesc(&desc);
     g_gameWindow = desc.OutputWindow;
 
-    std::lock_guard<std::mutex> lk(imguiMutex());
+    std::lock_guard<std::recursive_mutex> lk(imguiMutex());
     IMGUI_CHECKVERSION();
     g_overlayCtx = ImGui::CreateContext();
     ImGui::SetCurrentContext(g_overlayCtx);
@@ -102,7 +102,7 @@ void initOverlay(IDXGISwapChain* sc) {
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* sc, UINT sync, UINT flags) {
     if (!g_initTried) initOverlay(sc);
     if (g_isDx11) {
-        std::lock_guard<std::mutex> lk(imguiMutex());
+        std::lock_guard<std::recursive_mutex> lk(imguiMutex());
         ImGui::SetCurrentContext(g_overlayCtx);
         if (!g_rtv) createRtv(sc);
         if (g_rtv) {
@@ -123,7 +123,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* sc, UINT sync, UINT flag
 
 HRESULT STDMETHODCALLTYPE hookedResizeBuffers(IDXGISwapChain* sc, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
     {
-        std::lock_guard<std::mutex> lk(imguiMutex());
+        std::lock_guard<std::recursive_mutex> lk(imguiMutex());
         releaseRtv();
     }
     return g_origResize(sc, count, w, h, fmt, flags);
@@ -182,7 +182,7 @@ void standaloneThread() {
 
     ImGuiContext* ctxImgui;
     {
-        std::lock_guard<std::mutex> lk(imguiMutex());
+        std::lock_guard<std::recursive_mutex> lk(imguiMutex());
         ctxImgui = ImGui::CreateContext();
         ImGui::SetCurrentContext(ctxImgui);
         ImGui::GetIO().IniFilename = nullptr;
@@ -195,13 +195,13 @@ void standaloneThread() {
     while (!g_standaloneClose) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            std::lock_guard<std::mutex> lk(imguiMutex());
+            std::lock_guard<std::recursive_mutex> lk(imguiMutex());
             ImGui::SetCurrentContext(ctxImgui);
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
         {
-            std::lock_guard<std::mutex> lk(imguiMutex());
+            std::lock_guard<std::recursive_mutex> lk(imguiMutex());
             ImGui::SetCurrentContext(ctxImgui);
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
@@ -220,7 +220,7 @@ void standaloneThread() {
         sc->Present(1, 0);
     }
     {
-        std::lock_guard<std::mutex> lk(imguiMutex());
+        std::lock_guard<std::recursive_mutex> lk(imguiMutex());
         ImGui::SetCurrentContext(ctxImgui);
         ImGui_ImplDX11_Shutdown();
         ImGui_ImplWin32_Shutdown();

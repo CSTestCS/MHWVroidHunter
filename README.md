@@ -181,6 +181,8 @@ What has been verified without the game:
   game waited at start-up while `VRoidHunterConverter.exe` converted it from a fake `chunkG0.bin`
   (`tests/make_fake_chunk.py`), the model files existed when the game continued, and the next
   start skipped the work.
+* `tests/fakegame/click_test.sh` clicks through the F7 menu in the stand-in game and checks the
+  game keeps running (regression test for the menu freeze fixed in 1.2.0).
 
 ## License
 

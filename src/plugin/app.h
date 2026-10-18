@@ -62,6 +62,8 @@ bool installOverlay();
 // Separate always-on-top settings window (used when the game runs in DirectX 12 mode).
 void toggleStandaloneWindow();
 // Serialises ImGui use between the overlay and the standalone window.
-std::mutex& imguiMutex();
+// Recursive: Win32 calls made by ImGui (e.g. ReleaseCapture) re-enter the window procedure
+// on the same thread while the lock is held.
+std::recursive_mutex& imguiMutex();
 
 } // namespace vhp
