@@ -2,8 +2,9 @@
 
 Play **Monster Hunter: World** (Steam) as your own **VRoid / VRM** model.
 
-* Drop your `.vrm` file into the **`VRoidHunter` folder** in the game folder; it is converted
-  automatically when the game starts (in a separate process, never inside the game).
+* Drop your `.vrm` file into the **`VRoidHunter` folder** in the game folder and press **Apply**
+  (F7 menu) or use the installer. Conversion takes a few seconds, runs in a separate process,
+  and never happens at game start-up.
 * The model replaces your hunter and is **sized to your hunter's height automatically**.
 * Per armor part (head, chest, arms, waist, legs) you can choose to **show your equipped hunter
   armor**, fitted onto the VRoid body.
@@ -42,9 +43,11 @@ converter window has closed.
 * Any `.vrm` in `<game>\VRoidHunter\` is picked up when the game starts. If there are several,
   the **newest** file is used; the F7 menu can switch between them (until a newer file is dropped
   in).
-* Conversion runs in `VRoidHunterConverter.exe`, a separate process. At start-up our
-  `dinput8.dll` holds the game until it finishes, so the model is ready the first time; a small
-  window shows progress. Unchanged models are skipped in well under a second.
+* Conversion runs in `VRoidHunterConverter.exe`, a separate process, only when you press Apply
+  (or use the installer). The first time it also reads the hunter skeleton and material
+  templates from the game archives and saves them (a few MB) in
+  `nativePC\plugins\MHWVroidHunter\game_data`; after that the archives are never opened again
+  (**Re-read game files** in the Advanced section clears that copy).
 * You can also run `VRoidHunterConverter.exe --apply` yourself before starting the game.
 
 **Steam Deck / Proton:** set the launch options to `WINEDLLOVERRIDES="dinput8=n,b" %command%`.

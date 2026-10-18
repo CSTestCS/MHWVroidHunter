@@ -30,6 +30,11 @@ public:
 // Reads directly from chunkG*.bin. The file list is cached in `cacheFile`.
 std::unique_ptr<GameSource> openArchiveSource(const std::string& gameDir, const std::string& cacheFile,
                                               const std::function<void(const std::string&)>& progress);
+// Normal path: the first call reads the archives once and saves just the template models and the
+// list of armour paths into `cacheDir` (a few MB); every later call uses only that saved copy.
+std::unique_ptr<GameSource> openCachedGameData(const std::string& gameDir, const std::string& cacheDir,
+                                               const std::function<void(const std::string&)>& progress);
+bool hasCachedGameData(const std::string& cacheDir);
 // Reads from a folder of already extracted files (e.g. a WorldChunkTool dump); used by tests/CLI.
 std::unique_ptr<GameSource> openFolderSource(const std::string& folder);
 

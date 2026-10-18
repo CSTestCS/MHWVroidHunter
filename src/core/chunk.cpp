@@ -218,21 +218,37 @@ std::string normalizeGamePath(const std::string& p) {
 }
 
 std::vector<ArchiveFile> ChunkArchive::listFiles(const std::function<bool(const std::string&)>& filter) {
+    // Guards: the file table sits at the start of the archive. If anything looks wrong we stop at
+    // once instead of walking (and decompressing) a multi-gigabyte archive as if it were a table.
+    const uint64_t streamSize = uint64_t(blocks_.size()) * kBlockSize;
+    const uint64_t maxTable = std::min<uint64_t>(streamSize, 1ull << 30);
+    auto fail = [](const std::string& why) { throw std::runtime_error("unexpected archive layout (" + why + ")"); };
     std::vector<ArchiveFile> out;
     uint8_t hdr[8];
     readStream(0x0C, hdr, 8);
-    int32_t parents;
+    int32_t parents, totalChildren;
     std::memcpy(&parents, hdr, 4);
-    if (parents < 0 || parents > 1000000) throw std::runtime_error("bad archive file table");
+    std::memcpy(&totalChildren, hdr + 4, 4);
+    if (parents < 0 || parents > 100000) fail("directory count");
+    if (totalChildren < 0 || uint64_t(totalChildren) * 0xB8 > maxTable) fail("file count");
+    int64_t seenChildren = 0;
     uint64_t pos = 0x100;
+    auto printable = [](const uint8_t* p, size_t n) {
+        for (size_t i = 0; i < n && p[i]; ++i)
+            if (p[i] < 0x20 || p[i] > 0x7e) return false;
+        return true;
+    };
     for (int32_t p = 0; p < parents; ++p) {
         uint8_t pe[0x58];
         readStream(pos, pe, sizeof(pe));
         pos += sizeof(pe);
         int32_t children;
         std::memcpy(&children, pe + 0x3C + 8 + 8 + 4, 4);
-        if (children < 0) throw std::runtime_error("bad archive directory entry");
+        if (children < 0 || !printable(pe, 0x3C)) fail("directory entry " + std::to_string(p));
+        seenChildren += children;
+        if (totalChildren > 0 && seenChildren > totalChildren) fail("more files than announced");
         for (int32_t c = 0; c < children; ++c) {
+            if (pos + 0xB8 > maxTable) fail("file table too large");
             uint8_t ce[0xB8];
             readStream(pos, ce, sizeof(ce));
             pos += sizeof(ce);
@@ -243,6 +259,8 @@ std::vector<ArchiveFile> ChunkArchive::listFiles(const std::function<bool(const 
             std::memcpy(&type, ce + 0xB0, 4);
             if (type != 0 && type != 2) continue; // directory
             size_t maxName = type == 2 ? 0x50 : 0xA0;
+            if (!printable(ce, maxName) || size < 0 || offset < 0 || uint64_t(offset) + uint64_t(size) > streamSize)
+                fail("file entry " + std::to_string(seenChildren - children + c));
             size_t len = 0;
             while (len < maxName && ce[len] != 0) ++len;
             std::string name = normalizeGamePath(std::string(reinterpret_cast<const char*>(ce), len));
@@ -304,8 +322,16 @@ std::vector<std::string> GameArchives::findArchives(const std::string& gameDir) 
         }
     }
     std::sort(found.begin(), found.end());
+    // The high resolution texture pack (chunkHiPC) holds no models; skip it when other archives exist.
+    bool hasRegular = false;
+    for (auto& f : found)
+        if (lowerCase(toU8(u8(std::get<2>(f)).parent_path().filename())).find("hipc") == std::string::npos) hasRegular = true;
     std::vector<std::string> out;
-    for (auto& f : found) out.push_back(std::get<2>(f));
+    for (auto& f : found) {
+        bool hipc = lowerCase(toU8(u8(std::get<2>(f)).parent_path().filename())).find("hipc") != std::string::npos;
+        if (hipc && hasRegular) continue;
+        out.push_back(std::get<2>(f));
+    }
     return out;
 }
 
@@ -408,7 +434,8 @@ std::vector<uint8_t> GameArchives::read(const std::string& path) {
 
 std::string GameArchives::fingerprint() const {
     std::string s;
-    for (auto& p : archivePaths_) s += p + ":" + std::to_string(fileSize(p)) + ":" + std::to_string(fileTime(p)) + ";";
+    // names, sizes and times only: the same folder can be reached through differently written paths
+    for (auto& p : archivePaths_) s += toU8(u8(p).filename()) + ":" + std::to_string(fileSize(p)) + ":" + std::to_string(fileTime(p)) + ";";
     return s;
 }
 

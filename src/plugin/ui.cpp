@@ -268,6 +268,12 @@ void drawSettingsUI(bool standalone) {
         ImGui::SameLine();
         changed |= ImGui::Checkbox("Male hunter", &s.applyToMale);
         changed |= ImGui::Checkbox("Remove fully transparent parts", &s.dropTransparent);
+        if (ImGui::SmallButton("Re-read game files")) {
+            // only needed if the game itself changed; the next Apply reads them once more
+            std::error_code ec;
+            std::filesystem::remove_all(vh::u8(vh::gameDataCacheDir(a.gameDir)), ec);
+            a.status = "Saved game data cleared; the next Apply reads the game files once (slow, one time).";
+        }
         const int sizes[] = {1024, 2048, 4096};
         int sel = s.maxTextureSize <= 1024 ? 0 : (s.maxTextureSize <= 2048 ? 1 : 2);
         if (ImGui::Combo("Max texture size", &sel, "1024\0" "2048\0" "4096\0")) {

@@ -11,6 +11,7 @@
 
 #include "app.h"
 #include "fsutil.h"
+#include "autoconvert.h"
 #include "models.h"
 
 namespace {
@@ -37,6 +38,21 @@ bool gameWindowFocused() {
     return pid == GetCurrentProcessId();
 }
 
+bool gameWindowExists() {
+    struct Ctx { DWORD pid; bool found; } ctx{GetCurrentProcessId(), false};
+    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+        auto* c = reinterpret_cast<Ctx*>(lp);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(h, &pid);
+        if (pid == c->pid && IsWindowVisible(h)) {
+            c->found = true;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&ctx));
+    return ctx.found;
+}
+
 void mainThread() {
     using namespace vhp;
     SetEvent(startupBegunEvent());
@@ -56,22 +72,33 @@ void mainThread() {
     }
     logLine("---- MHW VRoid Hunter started ----");
 
-    // Convert a newly dropped model (or changed settings) before the game loads the hunter.
-    // The converter is a separate process; the dinput8 loader waits for it (see VH_WaitForStartupWork).
+    // Nothing is converted at start-up (that only happens when "Apply" is pressed). Just report
+    // whether the installed model matches the model in the VRoidHunter folder.
     try {
         vh::ensureModelsFolder(a.gameDir);
     } catch (...) {
     }
     a.refreshModels();
-    if (a.runConverter("--auto", false)) {
-        std::thread([] {
-            while (app().busy) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            SetEvent(startupDoneEvent());
-        }).detach();
-    } else {
-        SetEvent(startupDoneEvent());
+    {
+        bool current = vh::modelUpToDate(a.gameDir);
+        std::string model;
+        bool enabled;
+        {
+            std::lock_guard<std::mutex> lk(a.mutex);
+            model = a.activeModel;
+            enabled = a.settings.enabled;
+        }
+        if (!enabled) a.setStatus("Mod is turned off.");
+        else if (model.empty()) a.setStatus("No .vrm file yet: put one in the VRoidHunter folder, then press F7 and Apply.");
+        else if (current) a.setStatus("VRoid model installed: " + model);
+        else a.setStatus("Model \"" + model + "\" is not installed yet: press F7, then Apply.");
     }
+    SetEvent(startupDoneEvent());
 
+    // Let the game create its window and DirectX device first; creating our temporary device at
+    // the same moment as the game creates its own can make the game's fail.
+    for (int i = 0; i < 1200 && !gameWindowExists(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
     const bool hooked = installOverlay();
     // Test hook: start with the menu open (used by the automated overlay test harness).
     if (GetEnvironmentVariableW(L"VH_OPEN_MENU_ON_START", nullptr, 0) > 0) a.menuVisible = true;

@@ -82,7 +82,9 @@ void Settings::save(const std::string& path) const {
 std::string Settings::modelKey() const {
     char buf[64];
     std::snprintf(buf, sizeof(buf), "|%.3f|%d|%d", conform, dropTransparent ? 1 : 0, maxTextureSize);
-    return vrmPath + buf + "|" + std::to_string(fileSize(vrmPath)) + "|" + std::to_string(fileTime(vrmPath));
+    // file name, size and time only: the same file can be reached through differently written
+    // paths (installer vs game), which must not count as a different model
+    return toU8(u8(vrmPath).filename()) + buf + "|" + std::to_string(fileSize(vrmPath)) + "|" + std::to_string(fileTime(vrmPath));
 }
 
 } // namespace vh

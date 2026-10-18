@@ -8,8 +8,10 @@ INSTALL
   3. Put your .vrm file (exported from VRoid Studio) into the new "VRoidHunter" folder
      inside the game folder. The installer's "Open models folder" button opens it.
      ("2. Add VRoid model..." does the same and converts the model right away.)
-  4. Start the game. A new or changed model is converted automatically at start-up
-     (a small progress window shows; the first time can take a few minutes).
+  4. Click "2. Add VRoid model..." (or start the game, press F7 and click Apply).
+     The model is converted once (a few seconds). The very first time, the mod also reads
+     the hunter's skeleton from the game files once and saves it; it never does that again.
+  5. Start the game. Nothing is converted at start-up.
 
 INSTALL WITHOUT THE INSTALLER
   Copy everything inside "manual-install" into the Monster Hunter World folder (the folder
@@ -18,12 +20,12 @@ INSTALL WITHOUT THE INSTALLER
       Monster Hunter World\nativePC\plugins\MHWVroidHunter.dll
       Monster Hunter World\nativePC\plugins\MHWVroidHunter\VRoidHunterConverter.exe
       Monster Hunter World\VRoidHunter\            <- put your .vrm here
-  If you already use Stracker's Loader, skip dinput8.dll. (With Stracker's Loader the game
-  does not wait for the conversion; restart the game once it has finished.)
+  If you already use Stracker's Loader, skip dinput8.dll.
+  Then start the game, press F7 and click Apply.
 
 CHANGING MODELS
-  Drop another .vrm into the VRoidHunter folder: the newest file is used the next time the
-  game starts. To switch between models already in the folder, use the F7 menu.
+  Drop another .vrm into the VRoidHunter folder (the newest file is used, or pick one in the
+  F7 menu) and click Apply. The corner message at start-up tells you if Apply is needed.
 
 IN GAME (F7)
     - Play as my VRoid model ...... turn the mod on/off

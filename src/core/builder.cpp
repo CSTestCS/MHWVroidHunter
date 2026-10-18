@@ -81,6 +81,29 @@ bool isFaceOrHair(const std::string& p, char gender) {
     return gender == 'f' ? startsWith(p, "pl\\f_face\\") : startsWith(p, "pl\\m_face\\");
 }
 
+// ---------------------------------------------------------------- template choice
+using GenderSets = std::map<std::string, std::map<int, std::vector<std::string>>>; // set -> slot -> files
+
+GenderSets& setsFor(std::map<char, GenderSets>& all, char g) { return all[g]; }
+
+std::map<char, GenderSets> collectSets(const std::vector<std::string>& files) {
+    std::map<char, GenderSets> sets;
+    for (auto& p : files) {
+        ArmorPath ap;
+        if (parseArmorPath(p, ap)) sets[ap.gender][ap.set][ap.slot].push_back(p);
+    }
+    return sets;
+}
+
+// A complete armour set (all five parts) whose models provide the hunter skeleton.
+std::string chooseTemplateSet(GenderSets& gs) {
+    for (const char* pref : {"pl001_0000", "pl002_0000", "pl003_0000", "pl000_0000"})
+        if (gs.count(pref) && gs[pref].size() == size_t(kSlotCount)) return pref;
+    for (auto& kv : gs)
+        if (kv.second.size() == size_t(kSlotCount)) return kv.first;
+    return "";
+}
+
 // ---------------------------------------------------------------- sources
 class ArchiveSource : public GameSource {
 public:
@@ -88,9 +111,9 @@ public:
                   const std::function<void(const std::string&)>& progress)
         : arch_(gameDir) {
         std::string fp = std::string("v") + kModVersion + "|" + arch_.fingerprint();
-        if (!loadCache(cacheFile, fp)) {
+        if (cacheFile.empty() || !loadCache(cacheFile, fp)) {
             arch_.index(isRelevantGamePath, progress);
-            saveCache(cacheFile, fp);
+            if (!cacheFile.empty()) saveCache(cacheFile, fp);
         }
     }
     std::vector<std::string> list() override {
@@ -134,6 +157,31 @@ private:
         }
     }
     GameArchives arch_;
+};
+
+// The few files the converter needs, saved once from the archives (see openCachedGameData).
+class CachedSource : public GameSource {
+public:
+    explicit CachedSource(std::string dir) : dir_(std::move(dir)) {
+        auto raw = readFile(join(dir_, "paths.txt"));
+        std::istringstream in(std::string(raw.begin(), raw.end()));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) paths_.push_back(line);
+        }
+    }
+    std::vector<std::string> list() override { return paths_; }
+    std::vector<uint8_t> read(const std::string& path) override {
+        std::string rel = toNativeRel(normalizeGamePath(path));
+        std::string file = join(join(dir_, "files"), rel);
+        if (!exists(file)) throw std::runtime_error("not in the saved game data: " + path + " (use \"Re-read game files\")");
+        return readFile(file);
+    }
+
+private:
+    std::string dir_;
+    std::vector<std::string> paths_;
 };
 
 class FolderSource : public GameSource {
@@ -273,6 +321,42 @@ std::unique_ptr<GameSource> openArchiveSource(const std::string& gameDir, const 
 }
 
 std::unique_ptr<GameSource> openFolderSource(const std::string& folder) { return std::make_unique<FolderSource>(folder); }
+
+bool hasCachedGameData(const std::string& cacheDir) { return exists(join(cacheDir, "paths.txt")); }
+
+std::unique_ptr<GameSource> openCachedGameData(const std::string& gameDir, const std::string& cacheDir,
+                                               const std::function<void(const std::string&)>& progress) {
+    if (hasCachedGameData(cacheDir)) return std::make_unique<CachedSource>(cacheDir);
+    // One time only: read the file list from the archives and save the template models plus the
+    // list of armour paths. Afterwards the (huge) archives are never opened again.
+    if (progress) progress("One-time setup: reading hunter data from the game files...");
+    const auto t0 = std::chrono::steady_clock::now();
+    ArchiveSource arch(gameDir, "", progress);
+    std::vector<std::string> files = arch.list();
+    std::map<char, GenderSets> sets = collectSets(files);
+    int saved = 0;
+    for (char g : {'f', 'm'}) {
+        GenderSets& gs = setsFor(sets, g);
+        std::string chosen = chooseTemplateSet(gs);
+        if (chosen.empty()) continue;
+        for (auto& slot : gs[chosen])
+            for (auto& path : slot.second) {
+                writeFile(join(join(cacheDir, "files"), toNativeRel(path)), arch.read(path));
+                ++saved;
+            }
+    }
+    if (!saved) throw std::runtime_error("No hunter armour models were found in the game files.");
+    std::string list;
+    for (auto& f : files) list += f + "\n";
+    writeFile(join(cacheDir, "paths.txt"), std::vector<uint8_t>(list.begin(), list.end())); // written last = complete
+    if (progress) {
+        char b[96];
+        std::snprintf(b, sizeof(b), "Saved the hunter data (%d files) in %.0fs. This never needs to run again.", saved,
+                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        progress(b);
+    }
+    return std::make_unique<CachedSource>(cacheDir);
+}
 
 // ---------------------------------------------------------------- ModManager
 
@@ -526,12 +610,7 @@ bool ModManager::buildModel(const Settings& s, GameSource& src, const std::vecto
         if ((g == 'f' && !s.applyToFemale) || (g == 'm' && !s.applyToMale)) continue;
         auto& gs = sets[g];
         // choose a complete armour set as template
-        std::string chosen;
-        for (const char* pref : {"pl001_0000", "pl002_0000", "pl003_0000", "pl000_0000"})
-            if (gs.count(pref) && gs[pref].size() == size_t(kSlotCount)) { chosen = pref; break; }
-        if (chosen.empty())
-            for (auto& kv : gs)
-                if (kv.second.size() == size_t(kSlotCount)) { chosen = kv.first; break; }
+        std::string chosen = chooseTemplateSet(gs);
         if (chosen.empty()) {
             say(std::string("No complete ") + (g == 'f' ? "female" : "male") + " armour set found, skipping.");
             continue;

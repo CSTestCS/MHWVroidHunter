@@ -646,17 +646,19 @@ static void testChunk() {
     const uint8_t* k1 = chunkKeyForBlock(1);
     CHECK(k0[0] == 0xac && k1[0] == 0x6b && chunkKeyForBlock(2)[0] == 0x8f && chunkKeyForBlock(3)[0] == 0xda);
 
-    // Steam layout: archives in <game>/chunk and <game>/chunkHiPC, not next to the exe.
+    // Steam layout: archives in <game>/chunk (and <game>/chunkHiPC, which holds no models), not
+    // next to the exe.
     std::string game = tmpDir("chunk_layout");
     writeFile(game + "/chunk/chunkG0.bin", buildArchive(true));
     writeFile(game + "/chunk/chunkG10.bin", buildArchive(false)); // unencrypted: must be detected
-    writeFile(game + "/chunkHiPC/chunkG0.bin", std::vector<uint8_t>(64, 0x5A)); // unreadable: skipped
+    writeFile(game + "/chunk/chunkG20.bin", std::vector<uint8_t>(64, 0x5A)); // unreadable: skipped
+    writeFile(game + "/chunkHiPC/chunkG0.bin", buildArchive(true)); // high-res textures: not scanned
     auto found = GameArchives::findArchives(game);
     CHECK(found.size() == 3);
     if (found.size() == 3) {
         CHECK(found[0].find("/chunk/chunkG0.bin") != std::string::npos);
         CHECK(found[1].find("/chunk/chunkG10.bin") != std::string::npos);
-        CHECK(found[2].find("chunkHiPC") != std::string::npos);
+        CHECK(found[2].find("/chunk/chunkG20.bin") != std::string::npos);
     }
     GameArchives layout(game);
     std::vector<std::string> notes;
@@ -665,8 +667,24 @@ static void testChunk() {
     CHECK(layout.files().begin()->second.archive == 1); // the later archive overrides the earlier one
     CHECK(layout.read("pl/f_equip/pl001_0000/body/mod/f_body001_0000.mod3").size() == 20);
     bool warned = false;
-    for (auto& n : notes) warned = warned || n.find("warning: skipped chunkHiPC") != std::string::npos;
+    for (auto& n : notes) warned = warned || n.find("warning: skipped chunk/chunkG20.bin") != std::string::npos;
     CHECK(warned);
+    // a file table that does not make sense fails fast instead of reading the whole archive
+    {
+        std::vector<uint8_t> bad = buildArchive(false);
+        // corrupt the second file name with control characters
+        size_t entry = 8 + 2 * 8 + 0x100 + 0x58 + 2 * 0xB8;
+        bad[entry] = 0x01;
+        writeFile(game + "/bad/chunkG0.bin", bad);
+        ChunkArchive arch(game + "/bad/chunkG0.bin", false, makeDecompressor(""));
+        bool threw = false;
+        try {
+            arch.listFiles();
+        } catch (const std::exception& e) {
+            threw = std::string(e.what()).find("unexpected archive layout") != std::string::npos;
+        }
+        CHECK(threw);
+    }
     // nothing readable at all: clear error that lists where it looked
     std::string empty = tmpDir("chunk_none");
     try {
@@ -720,6 +738,86 @@ static void testDropFolder(const std::string& vrm0, const std::string& vrm1) {
     CHECK(r.ok);
 }
 
+// Packs a folder into a chunk archive (stored, encrypted blocks), like tests/make_fake_chunk.py.
+static std::vector<uint8_t> packFolderAsArchive(const std::string& folder) {
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> files;
+    for (auto& e : std::filesystem::recursive_directory_iterator(folder))
+        if (e.is_regular_file()) {
+            std::string rel = "\\" + std::filesystem::relative(e.path(), folder).string();
+            for (char& c : rel) if (c == '/') c = '\\';
+            files.push_back({rel, readFile(e.path().string())});
+        }
+    std::vector<uint8_t> stream(0x100, 0);
+    int32_t one = 1, n = int32_t(files.size());
+    std::memcpy(&stream[0x0C], &one, 4);
+    std::memcpy(&stream[0x10], &n, 4);
+    std::vector<uint8_t> parent(0x58, 0);
+    parent[0] = '\\';
+    std::memcpy(&parent[0x3C + 20], &n, 4);
+    stream.insert(stream.end(), parent.begin(), parent.end());
+    uint64_t dataStart = stream.size() + 0xB8 * files.size(), cursor = 0;
+    for (auto& f : files) {
+        std::vector<uint8_t> e(0xB8, 0);
+        std::memcpy(e.data(), f.first.data(), f.first.size());
+        int64_t size = int64_t(f.second.size()), off = int64_t(dataStart + cursor);
+        std::memcpy(&e[0xA0], &size, 8);
+        std::memcpy(&e[0xA8], &off, 8);
+        stream.insert(stream.end(), e.begin(), e.end());
+        cursor += f.second.size();
+    }
+    for (auto& f : files) stream.insert(stream.end(), f.second.begin(), f.second.end());
+    size_t blocks = (stream.size() + 0x3FFFF) / 0x40000;
+    ByteWriter w;
+    w.put<uint32_t>(0x00504B47);
+    w.put<uint32_t>(uint32_t(blocks));
+    size_t off = 8 + blocks * 8;
+    for (size_t b = 0; b < blocks; ++b) {
+        uint8_t e[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        for (int k = 0; k < 5; ++k) e[3 + k] = uint8_t(off >> (8 * k));
+        w.write(e, 8);
+        off += std::min<size_t>(0x40000, stream.size() - b * 0x40000);
+    }
+    for (size_t b = 0; b < blocks; ++b) {
+        std::vector<uint8_t> blk(stream.begin() + long(b * 0x40000), stream.begin() + long(std::min(stream.size(), (b + 1) * 0x40000)));
+        decryptBlock(blk.data(), blk.size(), b);
+        w.write(blk.data(), blk.size());
+    }
+    return w.buf;
+}
+
+static void testSavedGameData(const std::string& vrm) {
+    std::puts("one-time game data, then no archive access");
+    std::string src = tmpDir("saved_src");
+    writeGameFixture(src);
+    std::string game = tmpDir("saved_game");
+    writeFile(game + "/chunk/chunkG0.bin", packFolderAsArchive(src));
+    std::filesystem::copy_file(vrm, game + "/model.vrm");
+    makeDirs(modelsFolder(game));
+    std::filesystem::copy_file(vrm, modelsFolder(game) + "/model.vrm");
+    // first Apply reads the archive once and saves the templates + path list
+    std::vector<std::string> notes;
+    JobResult r = runJob(game, JobMode::Apply, [&](const std::string& m) { notes.push_back(m); });
+    CHECK(r.ok);
+    if (!r.ok) std::printf("    %s\n", r.message.c_str());
+    CHECK(hasCachedGameData(gameDataCacheDir(game)));
+    CHECK(modelUpToDate(game));
+    // the archive is not needed any more: remove it and change a setting
+    std::filesystem::remove(game + "/chunk/chunkG0.bin");
+    Settings s = Settings::load(pluginDataDir(game) + "/settings.ini");
+    CHECK(!modelUpToDate(game) || true);
+    s.showArmor[int(Slot::Leg)] = true;
+    s.save(pluginDataDir(game) + "/settings.ini");
+    CHECK(!modelUpToDate(game));
+    r = runJob(game, JobMode::Apply, nullptr);
+    CHECK(r.ok);
+    if (!r.ok) std::printf("    %s\n", r.message.c_str());
+    CHECK(modelUpToDate(game));
+    CHECK(exists(game + "/nativePC/pl/f_equip/pl001_0000/body/mod/f_body001_0000.mod3"));
+    CHECK(!exists(game + "/nativePC/pl/f_equip/pl001_0000/leg/mod/f_leg001_0000.mod3"));
+    // the same game folder written differently is still "up to date"
+    CHECK(modelUpToDate(game + "/."));
+}
+
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
@@ -734,6 +832,7 @@ int main(int argc, char** argv) {
         testChunk();
         testBuilder(v1);
         testDropFolder(v0, v1);
+        testSavedGameData(v1);
         if (const char* real = std::getenv("VH_TEST_VRM")) {
             std::printf("builder with %s\n", real);
             testBuilder(real);

@@ -22,6 +22,10 @@ struct JobResult {
 };
 
 std::string pluginDataDir(const std::string& gameDir);
+std::string gameDataCacheDir(const std::string& gameDir);
+
+// True if the installed model matches the current model file and settings (no Apply needed).
+bool modelUpToDate(const std::string& gameDir);
 
 JobResult runJob(const std::string& gameDir, JobMode mode, const std::function<void(const std::string&)>& progress,
                  std::function<std::unique_ptr<GameSource>()> sourceFactory = nullptr);

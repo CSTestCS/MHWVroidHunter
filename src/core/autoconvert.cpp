@@ -6,6 +6,7 @@
 namespace vh {
 
 std::string pluginDataDir(const std::string& gameDir) { return join(gameDir, "nativePC/plugins/MHWVroidHunter"); }
+std::string gameDataCacheDir(const std::string& gameDir) { return join(pluginDataDir(gameDir), "game_data"); }
 
 namespace {
 
@@ -29,6 +30,18 @@ std::string readText(const std::string& path) {
 
 } // namespace
 
+bool modelUpToDate(const std::string& gameDir) {
+    try {
+        const std::string data = pluginDataDir(gameDir);
+        Settings s = Settings::load(join(data, "settings.ini"));
+        s.vrmPath = resolveModel(gameDir, s);
+        if (s.enabled && s.vrmPath.empty()) return true; // nothing to install
+        return readText(join(data, "applied_state.txt")) == stateKey(s);
+    } catch (...) {
+        return false;
+    }
+}
+
 JobResult runJob(const std::string& gameDir, JobMode mode, const std::function<void(const std::string&)>& progress,
                  std::function<std::unique_ptr<GameSource>()> sourceFactory) {
     JobResult r;
@@ -38,9 +51,7 @@ JobResult runJob(const std::string& gameDir, JobMode mode, const std::function<v
         makeDirs(data);
         ensureModelsFolder(gameDir);
         if (!sourceFactory)
-            sourceFactory = [gameDir, data, progress] {
-                return openArchiveSource(gameDir, join(data, "game_index.cache"), progress);
-            };
+            sourceFactory = [gameDir, progress] { return openCachedGameData(gameDir, gameDataCacheDir(gameDir), progress); };
         ModManager mm(join(gameDir, "nativePC"), data, sourceFactory);
 
         if (mode == JobMode::Remove) {

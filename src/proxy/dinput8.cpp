@@ -11,8 +11,7 @@ extern "C" const char MHWVroidHunterProxyMarker[] = "MHWVroidHunter-dinput8-prox
 namespace {
 
 HMODULE g_real = nullptr;
-HANDLE g_loadThread = nullptr;
-volatile LONG g_waited = 0;
+
 using CreateFn = HRESULT(WINAPI*)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
 CreateFn g_create = nullptr;
 
@@ -37,21 +36,7 @@ DWORD WINAPI loadPlugin(LPVOID) {
 
 } // namespace
 
-// The first call happens while the game is starting up, before it loads the hunter's models.
-// If the plugin is converting a newly dropped VRoid model, wait for it here so the model is
-// ready the first time (the converter shows its own small progress window meanwhile).
-void waitForPluginStartupWork() {
-    if (InterlockedExchange(&g_waited, 1)) return;
-    if (g_loadThread) WaitForSingleObject(g_loadThread, 30000);
-    HMODULE plugin = GetModuleHandleW(L"MHWVroidHunter.dll");
-    if (!plugin) return;
-    using WaitFn = BOOL(WINAPI*)(DWORD);
-    auto wait = reinterpret_cast<WaitFn>(reinterpret_cast<void*>(GetProcAddress(plugin, "VH_WaitForStartupWork")));
-    if (wait) wait(15 * 60 * 1000);
-}
-
 extern "C" HRESULT WINAPI DirectInput8Create(HINSTANCE inst, DWORD version, REFIID riid, LPVOID* out, LPUNKNOWN outer) {
-    waitForPluginStartupWork();
     loadReal();
     if (!g_create) return E_FAIL;
     return g_create(inst, version, riid, out, outer);
@@ -61,7 +46,8 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
         // LoadLibrary must not run inside DllMain; the thread starts once the loader lock is free.
-        g_loadThread = CreateThread(nullptr, 0, loadPlugin, nullptr, 0, nullptr);
+        HANDLE t = CreateThread(nullptr, 0, loadPlugin, nullptr, 0, nullptr);
+        if (t) CloseHandle(t);
     }
     return TRUE;
 }
