@@ -602,28 +602,31 @@ static void testChunk() {
     for (int i = 0; i < 20; ++i) stream[size_t(fileOff) + size_t(i)] = uint8_t(i + 1);
     std::memcpy(&stream[100], "MRL", 3);
 
-    // encrypt blocks and write the archive with "stored" (size 0) entries
-    const size_t blocks = 2;
-    ByteWriter w;
-    w.put<uint32_t>(0x00504B47);
-    w.put<uint32_t>(uint32_t(blocks));
-    size_t dataStart = 8 + blocks * 8;
-    std::vector<std::vector<uint8_t>> enc;
-    for (size_t b = 0; b < blocks; ++b) {
-        std::vector<uint8_t> blk(stream.begin() + long(b * 0x40000), stream.begin() + long(std::min(stream.size(), (b + 1) * 0x40000)));
-        decryptBlock(blk.data(), blk.size(), b);
-        enc.push_back(blk);
-    }
-    size_t off = dataStart;
-    for (size_t b = 0; b < blocks; ++b) {
-        uint8_t e[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-        for (int k = 0; k < 5; ++k) e[3 + k] = uint8_t(off >> (8 * k));
-        w.write(e, 8);
-        off += enc[b].size();
-    }
-    for (auto& e : enc) w.write(e.data(), e.size());
+    // write the archive with "stored" (size 0) entries, optionally encrypted
+    auto buildArchive = [&](bool encrypt) {
+        const size_t blocks = 2;
+        ByteWriter w;
+        w.put<uint32_t>(0x00504B47);
+        w.put<uint32_t>(uint32_t(blocks));
+        size_t dataStart = 8 + blocks * 8;
+        std::vector<std::vector<uint8_t>> enc;
+        for (size_t b = 0; b < blocks; ++b) {
+            std::vector<uint8_t> blk(stream.begin() + long(b * 0x40000), stream.begin() + long(std::min(stream.size(), (b + 1) * 0x40000)));
+            if (encrypt) decryptBlock(blk.data(), blk.size(), b);
+            enc.push_back(blk);
+        }
+        size_t off = dataStart;
+        for (size_t b = 0; b < blocks; ++b) {
+            uint8_t e[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+            for (int k = 0; k < 5; ++k) e[3 + k] = uint8_t(off >> (8 * k));
+            w.write(e, 8);
+            off += enc[b].size();
+        }
+        for (auto& e : enc) w.write(e.data(), e.size());
+        return w.buf;
+    };
     std::string dir = tmpDir("chunk");
-    writeFile(dir + "/chunkG0.bin", w.buf);
+    writeFile(dir + "/chunkG0.bin", buildArchive(true));
 
     ChunkArchive arch(dir + "/chunkG0.bin", true, makeDecompressor(""));
     auto files = arch.listFiles();
@@ -642,6 +645,36 @@ static void testChunk() {
     const uint8_t* k0 = chunkKeyForBlock(0);
     const uint8_t* k1 = chunkKeyForBlock(1);
     CHECK(k0[0] == 0xac && k1[0] == 0x6b && chunkKeyForBlock(2)[0] == 0x8f && chunkKeyForBlock(3)[0] == 0xda);
+
+    // Steam layout: archives in <game>/chunk and <game>/chunkHiPC, not next to the exe.
+    std::string game = tmpDir("chunk_layout");
+    writeFile(game + "/chunk/chunkG0.bin", buildArchive(true));
+    writeFile(game + "/chunk/chunkG10.bin", buildArchive(false)); // unencrypted: must be detected
+    writeFile(game + "/chunkHiPC/chunkG0.bin", std::vector<uint8_t>(64, 0x5A)); // unreadable: skipped
+    auto found = GameArchives::findArchives(game);
+    CHECK(found.size() == 3);
+    if (found.size() == 3) {
+        CHECK(found[0].find("/chunk/chunkG0.bin") != std::string::npos);
+        CHECK(found[1].find("/chunk/chunkG10.bin") != std::string::npos);
+        CHECK(found[2].find("chunkHiPC") != std::string::npos);
+    }
+    GameArchives layout(game);
+    std::vector<std::string> notes;
+    layout.index(isRelevantGamePath, [&](const std::string& m) { notes.push_back(m); });
+    CHECK(layout.files().size() == 2);
+    CHECK(layout.files().begin()->second.archive == 1); // the later archive overrides the earlier one
+    CHECK(layout.read("pl/f_equip/pl001_0000/body/mod/f_body001_0000.mod3").size() == 20);
+    bool warned = false;
+    for (auto& n : notes) warned = warned || n.find("warning: skipped chunkHiPC") != std::string::npos;
+    CHECK(warned);
+    // nothing readable at all: clear error that lists where it looked
+    std::string empty = tmpDir("chunk_none");
+    try {
+        GameArchives none(empty);
+        CHECK(false);
+    } catch (const std::exception& e) {
+        CHECK(std::string(e.what()).find("Searched") != std::string::npos);
+    }
 }
 
 static void testDropFolder(const std::string& vrm0, const std::string& vrm1) {

@@ -72,7 +72,8 @@ In DirectX 12 mode the menu opens as a separate small window instead of an overl
 The game loads loose files from `nativePC` in place of the files in its archives. The mod uses
 that, so it never patches game code or memory:
 
-1. **Read the hunter from your own game files.** The `chunkG*.bin` archives are decrypted and
+1. **Read the hunter from your own game files.** The `chunkG*.bin` archives (in `<game>\chunk\`
+   and `<game>\chunkHiPC\`; archives that can't be read are skipped) are decrypted and
    decompressed (open-source Oodle-compatible decoder) to read the player's armor models. A
    complete armor set provides the hunter skeleton (bone ids, rest pose), mesh settings and an
    armor material to use as a template. No Capcom files are shipped with the mod.

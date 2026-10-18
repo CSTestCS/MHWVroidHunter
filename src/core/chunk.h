@@ -42,6 +42,8 @@ public:
     // Parses the file table. The callback may return false to skip storing an entry.
     std::vector<ArchiveFile> listFiles(const std::function<bool(const std::string&)>& filter = nullptr);
     std::vector<uint8_t> read(uint64_t offset, uint64_t size);
+    // True if the file table decodes to something sensible (used to detect encryption).
+    bool looksValid();
     size_t blockCount() const { return blocks_.size(); }
 
     static constexpr uint32_t kBlockSize = 0x40000;
@@ -69,8 +71,10 @@ std::string normalizeGamePath(const std::string& p);
 class GameArchives {
 public:
     explicit GameArchives(const std::string& gameDir);
-    // Lists chunk archive files in load order.
+    // Lists chunk archive files in load order. Looks in the game folder and in every sub folder
+    // whose name starts with "chunk" (the Steam version uses <game>/chunk and <game>/chunkHiPC).
     static std::vector<std::string> findArchives(const std::string& gameDir);
+    static std::vector<std::string> searchFolders(const std::string& gameDir);
 
     struct Location {
         int archive;

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstring>
 #include <stdexcept>
+#include <tuple>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -172,6 +173,27 @@ void ChunkArchive::readStream(uint64_t pos, void* outp, size_t n) {
     }
 }
 
+bool ChunkArchive::looksValid() {
+    try {
+        uint8_t hdr[8];
+        readStream(0x0C, hdr, 8);
+        int32_t parents, children;
+        std::memcpy(&parents, hdr, 4);
+        std::memcpy(&children, hdr + 4, 4);
+        if (parents <= 0 || parents > 100000 || children < 0) return false;
+        uint8_t first[0x3C];
+        readStream(0x100, first, sizeof(first));
+        // the first directory name is plain text (e.g. "\\")
+        for (uint8_t c : first) {
+            if (c == 0) break;
+            if (c < 0x20 || c > 0x7e) return false;
+        }
+        return first[0] != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
 std::vector<uint8_t> ChunkArchive::read(uint64_t offset, uint64_t size) {
     if (size > (1ull << 31)) throw std::runtime_error("file too large");
     std::vector<uint8_t> v(static_cast<size_t>(size));
@@ -227,45 +249,117 @@ std::vector<ArchiveFile> ChunkArchive::listFiles(const std::function<bool(const 
     return out;
 }
 
-std::vector<std::string> GameArchives::findArchives(const std::string& gameDir) {
-    std::vector<std::pair<int, std::string>> found;
+namespace {
+
+std::string lowerCase(std::string s) {
+    for (char& ch : s) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+// "chunkG12.bin" -> 12, "chunk3.bin" -> 3, anything else -> -1
+int chunkNumber(const std::string& lowerName) {
+    if (lowerName.rfind("chunk", 0) != 0 || lowerName.size() < 10 || lowerName.substr(lowerName.size() - 4) != ".bin") return -1;
+    std::string num = lowerName.substr(5, lowerName.size() - 9);
+    if (!num.empty() && num[0] == 'g') num = num.substr(1);
+    if (num.empty() || !std::all_of(num.begin(), num.end(), ::isdigit)) return -1;
+    return std::atoi(num.c_str());
+}
+
+} // namespace
+
+std::vector<std::string> GameArchives::searchFolders(const std::string& gameDir) {
+    // The Steam version keeps its archives in <game>/chunk (and the high resolution texture
+    // pack in <game>/chunkHiPC); older builds had them next to the exe.
+    std::vector<std::string> dirs = {gameDir};
+    std::vector<std::string> sub;
     std::error_code ec;
     for (auto& e : std::filesystem::directory_iterator(u8(gameDir), ec)) {
-        std::string n = toU8(e.path().filename());
-        std::string lower = n;
-        for (char& ch : lower) ch = char(std::tolower(static_cast<unsigned char>(ch)));
-        if (lower.rfind("chunkg", 0) != 0 || lower.size() < 11 || lower.substr(lower.size() - 4) != ".bin") continue;
-        std::string num = lower.substr(6, lower.size() - 10);
-        if (num.empty() || !std::all_of(num.begin(), num.end(), ::isdigit)) continue;
-        found.push_back({std::atoi(num.c_str()), toU8(e.path())});
+        if (!e.is_directory(ec)) continue;
+        std::string n = lowerCase(toU8(e.path().filename()));
+        if (n.rfind("chunk", 0) == 0) sub.push_back(toU8(e.path()));
+    }
+    // "chunk" first, then the others (e.g. chunkHiPC) so they override it
+    std::sort(sub.begin(), sub.end(), [](const std::string& x, const std::string& y) {
+        std::string a = lowerCase(toU8(u8(x).filename())), b = lowerCase(toU8(u8(y).filename()));
+        if ((a == "chunk") != (b == "chunk")) return a == "chunk";
+        return a < b;
+    });
+    dirs.insert(dirs.end(), sub.begin(), sub.end());
+    return dirs;
+}
+
+std::vector<std::string> GameArchives::findArchives(const std::string& gameDir) {
+    std::vector<std::tuple<int, int, std::string>> found; // folder order, number, path
+    std::vector<std::string> dirs = searchFolders(gameDir);
+    for (size_t d = 0; d < dirs.size(); ++d) {
+        std::error_code ec;
+        for (auto& e : std::filesystem::directory_iterator(u8(dirs[d]), ec)) {
+            if (!e.is_regular_file(ec)) continue;
+            int n = chunkNumber(lowerCase(toU8(e.path().filename())));
+            if (n >= 0) found.emplace_back(int(d), n, toU8(e.path()));
+        }
     }
     std::sort(found.begin(), found.end());
     std::vector<std::string> out;
-    for (auto& f : found) out.push_back(f.second);
+    for (auto& f : found) out.push_back(std::get<2>(f));
     return out;
 }
 
 GameArchives::GameArchives(const std::string& gameDir) : gameDir_(gameDir) {
     archivePaths_ = findArchives(gameDir);
-    if (archivePaths_.empty())
-        throw std::runtime_error("No chunkG*.bin archives found in " + gameDir + ". Is this the Monster Hunter World folder?");
+    if (archivePaths_.empty()) {
+        std::string where;
+        for (auto& d : searchFolders(gameDir)) where += "\n  " + d;
+        throw std::runtime_error("No chunk*.bin game archives were found. Searched:" + where +
+                                 "\nIs this the Monster Hunter World folder?");
+    }
     archives_.resize(archivePaths_.size());
     dec_ = makeDecompressor(gameDir);
 }
 
 ChunkArchive& GameArchives::archive(int i) {
     auto& a = archives_.at(size_t(i));
-    if (!a) a = std::make_unique<ChunkArchive>(archivePaths_[size_t(i)], true, dec_);
+    if (!a) {
+        const std::string& path = archivePaths_[size_t(i)];
+        // Iceborne archives (chunkG*) are encrypted, older ones are not; try the other mode if the
+        // file table does not look right.
+        bool guess = lowerCase(toU8(u8(path).filename())).rfind("chunkg", 0) == 0;
+        std::string firstError;
+        for (bool encrypted : {guess, !guess}) {
+            try {
+                auto c = std::make_unique<ChunkArchive>(path, encrypted, dec_);
+                if (c->looksValid()) {
+                    a = std::move(c);
+                    break;
+                }
+                if (firstError.empty()) firstError = "unrecognised file table";
+            } catch (const std::exception& e) {
+                if (firstError.empty()) firstError = e.what();
+            }
+        }
+        if (!a) throw std::runtime_error("Could not read " + path + ": " + firstError);
+    }
     return *a;
 }
 
 void GameArchives::index(const std::function<bool(const std::string&)>& filter,
                          const std::function<void(const std::string&)>& progress) {
     files_.clear();
+    std::string errors;
+    int ok = 0;
     for (size_t i = 0; i < archivePaths_.size(); ++i) {
-        if (progress) progress("Reading game file list " + std::to_string(i + 1) + "/" + std::to_string(archivePaths_.size()));
-        for (auto& f : archive(int(i)).listFiles(filter)) files_[f.path] = Location{int(i), f.offset, f.size};
+        const std::string name = toU8(u8(archivePaths_[i]).parent_path().filename()) + "/" + toU8(u8(archivePaths_[i]).filename());
+        if (progress) progress("Reading game file list " + std::to_string(i + 1) + "/" + std::to_string(archivePaths_.size()) + " (" + name + ")");
+        try {
+            for (auto& f : archive(int(i)).listFiles(filter)) files_[f.path] = Location{int(i), f.offset, f.size};
+            ++ok;
+        } catch (const std::exception& e) {
+            // one unreadable archive (e.g. an optional pack) must not stop everything
+            errors += std::string("\n  ") + e.what();
+            if (progress) progress("warning: skipped " + name + ": " + e.what());
+        }
     }
+    if (!ok) throw std::runtime_error("None of the game archives could be read:" + errors);
 }
 
 std::vector<uint8_t> GameArchives::read(const std::string& path) {
