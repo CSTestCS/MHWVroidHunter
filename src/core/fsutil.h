@@ -16,6 +16,11 @@ std::string toU8(const std::filesystem::path& p);
 std::vector<uint8_t> readFile(const std::string& path);
 // Writes to a temporary file and renames it into place.
 void writeFile(const std::string& path, const std::vector<uint8_t>& data);
+// Overwrites an existing file without replacing it, so every hard link to it sees the new data.
+void writeFileInPlace(const std::string& path, const std::vector<uint8_t>& data);
+// True if both paths are the same file (e.g. hard links to one file).
+bool sameFile(const std::string& a, const std::string& b);
+uint64_t hardLinkCount(const std::string& path);
 bool exists(const std::string& path);
 void makeDirs(const std::string& path);
 bool removeFile(const std::string& path);

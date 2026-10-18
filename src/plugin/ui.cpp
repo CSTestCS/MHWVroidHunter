@@ -72,7 +72,7 @@ bool App::runConverter(const char* mode, bool hidden) {
     PROCESS_INFORMATION pi{};
     std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(0);
-    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, nullptr,
+    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
                         vh::u8(dataDir).wstring().c_str(), &si, &pi)) {
         setStatus("Could not start VRoidHunterConverter.exe (error " + std::to_string(GetLastError()) + ").");
         busy = false;

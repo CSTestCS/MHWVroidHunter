@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -66,12 +67,19 @@ private:
     void loadManifest();
     void saveManifest() const;
     bool buildModel(const Settings& s, GameSource& src, const std::vector<std::string>& files, const std::string& modelDir,
-                    std::vector<std::string>& log, const std::function<void(const std::string&)>& progress);
+                    const std::string& texTag, const std::string& doneKey, std::vector<std::string>& log,
+                    const std::function<void(const std::string&)>& progress);
+    // Hard links every armour path to its master file (in parallel). Returns the number of
+    // links in place; counts conflicts/failures in `r`.
+    int installLinks(const std::map<std::string, std::string>& links, ApplyResult& r,
+                     const std::function<void(const std::string&)>& say);
+    void addToManifest(const std::string& rel);
 
     std::string nativePC_;
     std::string dataDir_;
     std::function<std::unique_ptr<GameSource>()> sourceFactory_;
     std::set<std::string> manifest_; // files we created, relative to nativePC (forward slashes)
+    std::mutex manifestMutex_;
 };
 
 } // namespace vh

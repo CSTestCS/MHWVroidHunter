@@ -5,6 +5,10 @@
 #include <cstring>
 #include <stdexcept>
 #include <tuple>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <thread>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -345,21 +349,55 @@ ChunkArchive& GameArchives::archive(int i) {
 void GameArchives::index(const std::function<bool(const std::string&)>& filter,
                          const std::function<void(const std::string&)>& progress) {
     files_.clear();
-    std::string errors;
-    int ok = 0;
-    for (size_t i = 0; i < archivePaths_.size(); ++i) {
-        const std::string name = toU8(u8(archivePaths_[i]).parent_path().filename()) + "/" + toU8(u8(archivePaths_[i]).filename());
-        if (progress) progress("Reading game file list " + std::to_string(i + 1) + "/" + std::to_string(archivePaths_.size()) + " (" + name + ")");
-        try {
-            for (auto& f : archive(int(i)).listFiles(filter)) files_[f.path] = Location{int(i), f.offset, f.size};
-            ++ok;
-        } catch (const std::exception& e) {
-            // one unreadable archive (e.g. an optional pack) must not stop everything
-            errors += std::string("\n  ") + e.what();
-            if (progress) progress("warning: skipped " + name + ": " + e.what());
+    const auto t0 = std::chrono::steady_clock::now();
+    const size_t n = archivePaths_.size();
+    std::vector<std::vector<ArchiveFile>> lists(n);
+    std::vector<std::string> errors(n);
+    std::mutex progressMutex;
+    std::atomic<size_t> next{0};
+    std::atomic<int> finished{0};
+    auto name = [&](size_t i) {
+        return toU8(u8(archivePaths_[i]).parent_path().filename()) + "/" + toU8(u8(archivePaths_[i]).filename());
+    };
+    // Each archive has its own file handle and block cache, so they can be read in parallel.
+    auto worker = [&] {
+        for (size_t i; (i = next++) < n;) {
+            try {
+                lists[i] = archive(int(i)).listFiles(filter);
+            } catch (const std::exception& e) {
+                errors[i] = e.what();
+            }
+            int f = ++finished;
+            if (progress) {
+                std::lock_guard<std::mutex> lk(progressMutex);
+                progress("Reading game file list " + std::to_string(f) + "/" + std::to_string(n) + " (" + name(i) + ")");
+            }
         }
+    };
+    unsigned workers = unsigned(std::max<size_t>(1, std::min<size_t>(n, 4)));
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < workers; ++t) pool.emplace_back(worker);
+    for (auto& t : pool) t.join();
+
+    std::string allErrors;
+    int ok = 0;
+    for (size_t i = 0; i < n; ++i) { // merge in load order so later archives override earlier ones
+        if (!errors[i].empty()) {
+            // one unreadable archive (e.g. an optional pack) must not stop everything
+            allErrors += "\n  " + errors[i];
+            if (progress) progress("warning: skipped " + name(i) + ": " + errors[i]);
+            continue;
+        }
+        ++ok;
+        for (auto& f : lists[i]) files_[f.path] = Location{int(i), f.offset, f.size};
     }
-    if (!ok) throw std::runtime_error("None of the game archives could be read:" + errors);
+    if (!ok) throw std::runtime_error("None of the game archives could be read:" + allErrors);
+    if (progress) {
+        char b[96];
+        std::snprintf(b, sizeof(b), "Read the game file list in %.1fs (cached for next time)",
+                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        progress(b);
+    }
 }
 
 std::vector<uint8_t> GameArchives::read(const std::string& path) {

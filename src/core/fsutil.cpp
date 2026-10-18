@@ -53,6 +53,31 @@ void writeFile(const std::string& path, const std::vector<uint8_t>& data) {
     if (ec) throw std::runtime_error("Cannot replace file: " + path + " (" + ec.message() + ")");
 }
 
+void writeFileInPlace(const std::string& path, const std::vector<uint8_t>& data) {
+    fs::path p = u8(path);
+    std::error_code ec;
+    if (!fs::exists(p, ec)) {
+        writeFile(path, data);
+        return;
+    }
+    std::ofstream f(p, std::ios::binary | std::ios::trunc); // truncates the same file (keeps its links)
+    if (!f) throw std::runtime_error("Cannot write file (in use?): " + path);
+    f.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+    if (!f) throw std::runtime_error("Cannot write file (disk full?): " + path);
+}
+
+bool sameFile(const std::string& a, const std::string& b) {
+    std::error_code ec;
+    bool same = fs::equivalent(u8(a), u8(b), ec);
+    return !ec && same;
+}
+
+uint64_t hardLinkCount(const std::string& path) {
+    std::error_code ec;
+    auto n = fs::hard_link_count(u8(path), ec);
+    return ec ? 0 : uint64_t(n);
+}
+
 bool exists(const std::string& path) {
     std::error_code ec;
     return fs::exists(u8(path), ec);

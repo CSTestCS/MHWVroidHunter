@@ -119,7 +119,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
     g_statusPath = vh::join(data, "converter_status.txt");
     g_mainThread = GetCurrentThreadId();
-    SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+    // At start-up the game waits for us, so run at full speed; in-game work stays in the background.
+    SetPriorityClass(GetCurrentProcess(), mode == vh::JobMode::Auto ? NORMAL_PRIORITY_CLASS : BELOW_NORMAL_PRIORITY_CLASS);
 
     // one conversion at a time
     HANDLE mtx = CreateMutexW(nullptr, FALSE, L"Local\\VRoidHunterConverter");

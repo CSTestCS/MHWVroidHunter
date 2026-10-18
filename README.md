@@ -95,7 +95,10 @@ that, so it never patches game code or memory:
    and `.tex` textures (BC1 compressed with mip maps).
 5. **Install by hard links.** Every armor model path for the parts showing the VRoid (all armor
    sets, both genders) becomes a hard link to the single converted file, so hundreds of armor
-   paths cost no extra disk space. When the VRoid head is shown, the hunter's face and hair
+   paths cost no extra disk space. The converted files keep fixed paths and are rewritten in place,
+   so switching models updates every link at once; links already in place are not touched again,
+   and a new copy is started every 1000 links (the NTFS limit is 1023). The game's file list is
+   read once (all archives in parallel) and cached. When the VRoid head is shown, the hunter's face and hair
    models are replaced with an invisible model. Files that another mod already provides are
    never overwritten, and a manifest records everything the mod created so it can be removed
    cleanly.

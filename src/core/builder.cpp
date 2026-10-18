@@ -1,6 +1,9 @@
 #include "builder.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <sstream>
@@ -316,6 +319,7 @@ ApplyResult ModManager::removeAll() {
     }
     manifest_.clear();
     saveManifest();
+    removeFile(join(dataDir_, "links_complete.txt"));
     // tidy up our own folder
     std::error_code ec;
     fs::remove_all(u8(join(nativePC_, "vroidhunter")), ec);
@@ -449,7 +453,8 @@ Mrl3File makeSlotMrl3(const TemplateMaterial& tm, const std::vector<std::pair<st
 } // namespace
 
 bool ModManager::buildModel(const Settings& s, GameSource& src, const std::vector<std::string>& files, const std::string& modelDir,
-                            std::vector<std::string>& log, const std::function<void(const std::string&)>& progress) {
+                            const std::string& texTag, const std::string& doneKey, std::vector<std::string>& log,
+                            const std::function<void(const std::string&)>& progress) {
     auto say = [&](const std::string& m) {
         log.push_back(m);
         if (progress) progress(m);
@@ -467,7 +472,8 @@ bool ModManager::buildModel(const Settings& s, GameSource& src, const std::vecto
     }
 
     // shared textures
-    const std::string texDirRes = modelDir + "\\tex\\";
+    // textures get a new folder per model so the game never shows a cached old texture
+    const std::string texDirRes = modelDir + "\\tex_" + texTag + "\\";
     TexturePaths tex;
     tex.normal = texDirRes + "flat_nm";
     tex.rmt = texDirRes + "matte_rmt";
@@ -475,19 +481,44 @@ bool ModManager::buildModel(const Settings& s, GameSource& src, const std::vecto
     tex.black = texDirRes + "black";
     auto writeRes = [&](const std::string& resPath, const std::string& ext, const std::vector<uint8_t>& data) {
         std::string rel = toNativeRel(resPath) + ext;
-        manifest_.insert(rel);
-        writeFile(join(nativePC_, rel), data);
+        addToManifest(rel);
+        if (ext == ".mod3" || ext == ".mrl3") {
+            // Model/material masters keep their path: rewriting them in place updates every
+            // armour path hard-linked to them at once, so a model change needs no re-linking.
+            writeFileInPlace(join(nativePC_, rel), data);
+            std::string base = toNativeRel(resPath);
+            for (int k = 1; k < 64; ++k) { // extra copies made when a file reached the hard link limit
+                std::string copy = base + "~" + std::to_string(k) + ext;
+                if (!exists(join(nativePC_, copy))) break;
+                writeFileInPlace(join(nativePC_, copy), data);
+            }
+        } else {
+            writeFile(join(nativePC_, rel), data);
+        }
     };
     writeRes(tex.normal, ".tex", buildTex(Image::solid(4, 4, 128, 128, 0, 255), TEX_R8G8B8A8_UNORM, false));
     writeRes(tex.rmt, ".tex", buildTex(Image::solid(4, 4, 200, 0, 0, 0), TEX_R8G8B8A8_UNORM, false));
     writeRes(tex.white, ".tex", buildTex(Image::solid(4, 4, 255, 255, 255, 255), TEX_R8G8B8A8_UNORM, false));
     writeRes(tex.black, ".tex", buildTex(Image::solid(4, 4, 0, 0, 0, 255), TEX_R8G8B8A8_UNORM, false));
-    for (size_t i = 0; i < vrm.materials.size(); ++i) {
-        say("Converting texture " + std::to_string(i + 1) + "/" + std::to_string(vrm.materials.size()));
-        char name[32];
-        std::snprintf(name, sizeof(name), "m%02d_bml", int(i));
-        tex.albedo[int(i)] = texDirRes + name;
-        writeRes(tex.albedo[int(i)], ".tex", buildTex(bakeAlbedo(vrm, vrm.materials[i], s.maxTextureSize), TEX_BC1_UNORM_SRGB, true));
+    {
+        // textures are independent: encode them on all CPU cores
+        say("Converting " + std::to_string(vrm.materials.size()) + " textures...");
+        std::vector<std::vector<uint8_t>> encoded(vrm.materials.size());
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> pool;
+        unsigned workers = std::max(1u, std::min(std::thread::hardware_concurrency(), 8u));
+        for (unsigned t = 0; t < workers; ++t)
+            pool.emplace_back([&] {
+                for (size_t i; (i = next++) < vrm.materials.size();)
+                    encoded[i] = buildTex(bakeAlbedo(vrm, vrm.materials[i], s.maxTextureSize), TEX_BC1_UNORM_SRGB, true);
+            });
+        for (auto& t : pool) t.join();
+        for (size_t i = 0; i < vrm.materials.size(); ++i) {
+            char name[32];
+            std::snprintf(name, sizeof(name), "m%02d_bml", int(i));
+            tex.albedo[int(i)] = texDirRes + name;
+            writeRes(tex.albedo[int(i)], ".tex", encoded[i]);
+        }
     }
 
     bool any = false;
@@ -595,10 +626,136 @@ bool ModManager::buildModel(const Settings& s, GameSource& src, const std::vecto
     }
     if (!any) throw std::runtime_error("No hunter template models were found in the game files.");
     std::string done = toNativeRel(modelDir) + "/done.txt";
-    std::string marker = s.modelKey();
-    writeFile(join(nativePC_, done), std::vector<uint8_t>(marker.begin(), marker.end()));
-    manifest_.insert(done);
+    writeFile(join(nativePC_, done), std::vector<uint8_t>(doneKey.begin(), doneKey.end()));
+    addToManifest(done);
     return true;
+}
+
+void ModManager::addToManifest(const std::string& rel) {
+    std::lock_guard<std::mutex> lk(manifestMutex_);
+    manifest_.insert(rel);
+}
+
+int ModManager::installLinks(const std::map<std::string, std::string>& links, ApplyResult& r,
+                             const std::function<void(const std::string&)>& say) {
+    // NTFS allows at most 1023 names per file; leave headroom and add copies of a master as needed.
+    constexpr uint64_t kMaxLinks = 1000;
+    std::map<std::string, std::vector<std::string>> byMaster;
+    for (auto& [link, master] : links) byMaster[master].push_back(link);
+    if (byMaster.empty()) return 0;
+
+    // Hard links are what makes this fast and small. Without them (FAT32/exFAT drives) every
+    // armour file would be a full copy: many gigabytes, so refuse instead of grinding away.
+    {
+        const std::string master = join(nativePC_, byMaster.begin()->first);
+        const std::string probe = join(nativePC_, "vroidhunter/.linktest");
+        removeFile(probe);
+        std::error_code ec;
+        fs::create_hard_link(u8(master), u8(probe), ec);
+        removeFile(probe);
+        if (ec)
+            throw std::runtime_error("The drive with Monster Hunter World does not support hard links (" + ec.message() +
+                                     "). The mod needs an NTFS formatted drive; FAT32/exFAT drives would need many "
+                                     "gigabytes of copies.");
+    }
+
+    // After a complete install, every link listed in the manifest is known to be right (masters
+    // never move and are rewritten in place), so only new links need work. After an interrupted
+    // run or an older version, check each file instead.
+    const std::string completeMarker = join(dataDir_, "links_complete.txt");
+    const bool trustManifest = exists(completeMarker);
+    removeFile(completeMarker);
+
+    std::vector<const std::pair<const std::string, std::vector<std::string>>*> groups;
+    for (auto& g : byMaster) groups.push_back(&g);
+    std::atomic<size_t> nextGroup{0};
+    std::atomic<int> done{0}, failed{0}, conflicts{0}, relinked{0};
+    std::mutex sayMutex;
+    auto worker = [&] {
+        for (size_t gi; (gi = nextGroup++) < groups.size();) {
+            const std::string& masterRel = groups[gi]->first;
+            const std::string ext = masterRel.substr(masterRel.size() - 5);
+            const std::string base = masterRel.substr(0, masterRel.size() - 5);
+            std::vector<std::string> targets = {masterRel};
+            for (int k = 1; k < 64 && exists(join(nativePC_, base + "~" + std::to_string(k) + ext)); ++k)
+                targets.push_back(base + "~" + std::to_string(k) + ext);
+            size_t current = 0;
+            uint64_t count = hardLinkCount(join(nativePC_, targets[0]));
+            for (const std::string& link : groups[gi]->second) {
+                const std::string abs = join(nativePC_, link);
+                bool ours;
+                {
+                    std::lock_guard<std::mutex> lk(manifestMutex_);
+                    ours = manifest_.count(link) != 0;
+                }
+                if (ours && trustManifest) {
+                    ++done;
+                    continue;
+                }
+                const bool present = exists(abs);
+                if (present && !ours) {
+                    ++conflicts; // belongs to another mod: never overwrite it
+                    continue;
+                }
+                bool ok = false;
+                if (present)
+                    for (auto& t : targets)
+                        if (sameFile(abs, join(nativePC_, t))) { ok = true; break; } // already correct: nothing to do
+                if (ok) {
+                    ++done;
+                    continue;
+                }
+                try {
+                    addToManifest(link); // record first so an interrupted run can still be cleaned up
+                    while (count >= kMaxLinks) {
+                        ++current;
+                        if (current == targets.size()) {
+                            std::string copy = base + "~" + std::to_string(current) + ext;
+                            fs::copy_file(u8(join(nativePC_, targets[0])), u8(join(nativePC_, copy)), fs::copy_options::overwrite_existing);
+                            addToManifest(copy);
+                            targets.push_back(copy);
+                        }
+                        count = hardLinkCount(join(nativePC_, targets[current]));
+                    }
+                    fs::path l = u8(abs);
+                    std::error_code ec;
+                    fs::create_directories(l.parent_path(), ec);
+                    fs::remove(l, ec);
+                    ec.clear();
+                    fs::create_hard_link(u8(join(nativePC_, targets[current])), l, ec);
+                    if (ec) throw std::runtime_error(link + ": " + ec.message());
+                    ++count;
+                    ++done;
+                    ++relinked;
+                } catch (const std::exception& e) {
+                    // usually a file the game currently has open; it is retried on the next apply
+                    {
+                        std::lock_guard<std::mutex> lk(manifestMutex_);
+                        if (!exists(abs)) manifest_.erase(link);
+                    }
+                    if (failed++ < 5) {
+                        std::lock_guard<std::mutex> lk(sayMutex);
+                        say(std::string("warning: ") + e.what());
+                    }
+                }
+            }
+            std::lock_guard<std::mutex> lk(manifestMutex_);
+            saveManifest(); // progress survives the game being closed mid-way
+        }
+    };
+    unsigned workers = std::max(1u, std::min(std::thread::hardware_concurrency(), 8u));
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < workers; ++t) pool.emplace_back(worker);
+    for (auto& t : pool) t.join();
+
+    r.skippedConflicts = conflicts;
+    if (!failed) {
+        std::string ok = "ok";
+        writeFile(completeMarker, std::vector<uint8_t>(ok.begin(), ok.end()));
+    }
+    if (failed) say(std::to_string(failed.load()) + " files could not be replaced (in use?). Apply again or restart the game.");
+    say(std::to_string(relinked.load()) + " links created, " + std::to_string(done - relinked) + " already up to date");
+    return done;
 }
 
 ApplyResult ModManager::apply(const Settings& s, const std::function<void(const std::string&)>& progress) {
@@ -616,21 +773,38 @@ ApplyResult ModManager::apply(const Settings& s, const std::function<void(const 
         if (files.empty()) throw std::runtime_error("No hunter model files were found in the game data.");
 
         const std::string key = std::string(kModVersion) + "|" + s.modelKey() + "|" + (s.applyToFemale ? "f" : "") + (s.applyToMale ? "m" : "");
-        const std::string modelDir = "vroidhunter\\" + hex8(jamcrc(key));
+        const std::string modelDir = "vroidhunter\\model";
+        const std::string texTag = hex8(jamcrc(key));
         const std::string doneRel = toNativeRel(modelDir) + "/done.txt";
+        auto seconds = [](std::chrono::steady_clock::time_point t0) {
+            char b[32];
+            std::snprintf(b, sizeof(b), "%.1fs", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            return std::string(b);
+        };
 
         std::set<std::string> previous = manifest_;
-        if (!exists(join(nativePC_, doneRel))) {
-            buildModel(s, *src, files, modelDir, r.log, progress);
+        std::string doneContent;
+        try {
+            auto d = readFile(join(nativePC_, doneRel));
+            doneContent.assign(d.begin(), d.end());
+        } catch (...) {
+        }
+        if (doneContent != key) {
+            auto t0 = std::chrono::steady_clock::now();
+            buildModel(s, *src, files, modelDir, texTag, key, r.log, progress);
+            say("Model converted in " + seconds(t0));
         } else {
             say("Model already converted, reusing it.");
         }
 
-        // desired files: everything in our model folder plus the links
+        // desired files: everything in our model folder (except textures of older models) plus the links
         std::set<std::string> desired;
         std::string prefix = toNativeRel(modelDir) + "/";
+        const std::string texPrefix = prefix + "tex_";
+        const std::string currentTex = prefix + "tex_" + texTag + "/";
         for (auto& p : manifest_)
-            if (startsWith(p, prefix.c_str())) desired.insert(p);
+            if (startsWith(p, prefix.c_str()) && (!startsWith(p, texPrefix.c_str()) || startsWith(p, currentTex.c_str())))
+                desired.insert(p);
 
         std::map<std::string, std::string> links; // link (relative) -> master (relative)
         for (char g : {'f', 'm'}) {
@@ -661,32 +835,21 @@ ApplyResult ModManager::apply(const Settings& s, const std::function<void(const 
             fs::path root = u8(join(nativePC_, "vroidhunter"));
             if (fs::exists(root, ec))
                 for (auto& e : fs::directory_iterator(root, ec))
-                    if (e.is_directory() && toU8(e.path().filename()) != hex8(jamcrc(key))) fs::remove_all(e.path(), ec);
+                    if (e.is_directory() && toU8(e.path().filename()) != "model") fs::remove_all(e.path(), ec); // older versions
+            fs::path model = u8(join(nativePC_, toNativeRel(modelDir)));
+            if (fs::exists(model, ec))
+                for (auto& e : fs::directory_iterator(model, ec)) {
+                    std::string n = toU8(e.path().filename());
+                    if (e.is_directory() && n.rfind("tex_", 0) == 0 && n != "tex_" + texTag) fs::remove_all(e.path(), ec);
+                }
         }
 
         say("Installing model files...");
-        int n = 0, copies = 0, failed = 0;
-        for (auto& [link, master] : links) {
-            std::string abs = join(nativePC_, link);
-            if (!manifest_.count(link) && exists(abs)) {
-                ++r.skippedConflicts; // belongs to another mod: never overwrite it
-                continue;
-            }
-            try {
-                // record first, so an interrupted run (e.g. the game was closed) can still be cleaned up
-                manifest_.insert(link);
-                if ((n % 256) == 0) saveManifest();
-                if (!linkOrCopy(join(nativePC_, master), abs)) ++copies;
-                ++n;
-            } catch (const std::exception& e) {
-                // usually a file the game currently has open; it is retried on the next apply
-                if (failed++ < 5) say(std::string("warning: ") + e.what());
-            }
-        }
-        if (failed) say(std::to_string(failed) + " files could not be replaced (in use?). Apply again or restart the game.");
+        auto t0 = std::chrono::steady_clock::now();
+        const int n = installLinks(links, r, say);
+        say("Installed " + std::to_string(n) + " files in " + seconds(t0));
         r.linkedFiles = n;
         saveManifest();
-        if (copies) say("note: " + std::to_string(copies) + " files had to be copied instead of linked (drive without hard link support?)");
         if (r.skippedConflicts)
             say(std::to_string(r.skippedConflicts) + " files were left alone because another mod already provides them.");
         r.ok = true;

@@ -1,6 +1,7 @@
 #include "tex.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 
@@ -98,6 +99,11 @@ Image fitToPowerOfTwo(const Image& src, int maxSize) {
 }
 
 Image downsample(const Image& src, bool srgb) {
+    static const auto kToLinear = [] {
+        std::array<float, 256> t{};
+        for (int i = 0; i < 256; ++i) t[size_t(i)] = srgbToLinear(i / 255.0f);
+        return t;
+    }();
     Image out;
     out.width = std::max(src.width / 2, 1);
     out.height = std::max(src.height / 2, 1);
@@ -108,7 +114,7 @@ Image downsample(const Image& src, bool srgb) {
             for (int dy = 0; dy < 2; ++dy)
                 for (int dx = 0; dx < 2; ++dx) {
                     const uint8_t* p = src.px(std::min(x * 2 + dx, src.width - 1), std::min(y * 2 + dy, src.height - 1));
-                    for (int c = 0; c < 3; ++c) acc[c] += srgb ? srgbToLinear(p[c] / 255.0f) : p[c] / 255.0f;
+                    for (int c = 0; c < 3; ++c) acc[c] += srgb ? kToLinear[p[c]] : p[c] / 255.0f;
                     acc[3] += p[3] / 255.0f;
                 }
             uint8_t* d = out.px(x, y);
