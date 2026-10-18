@@ -1,6 +1,7 @@
 // User settings, stored as a small key=value file next to the plugin.
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "hunter.h"
@@ -8,8 +9,10 @@
 namespace vh {
 
 struct Settings {
-    bool enabled = false;               // play as the VRoid model
-    std::string vrmPath;                // UTF-8 path of the .vrm file
+    bool enabled = true;                // play as the VRoid model
+    std::string vrmPath;                // explicit .vrm path (command line tools); the drop folder wins
+    std::string modelName;              // model chosen in the menu (file name in the drop folder)
+    int64_t modelPickedNewest = 0;      // newest file time in the drop folder when it was chosen
     bool showArmor[kSlotCount] = {false, false, false, false, false}; // per slot: show hunter armour instead
     float conform = 1.0f;               // 1 = fit VRoid body to the hunter skeleton (best armour fit)
     bool dropTransparent = true;

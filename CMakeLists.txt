@@ -27,6 +27,8 @@ add_library(vh_core STATIC
   src/core/chunk.cpp
   src/core/builder.cpp
   src/core/settings.cpp
+  src/core/models.cpp
+  src/core/autoconvert.cpp
   src/core/fsutil.cpp
   src/core/third_party_impl.cpp)
 target_include_directories(vh_core PUBLIC src/core
@@ -74,7 +76,7 @@ if(WIN32)
     src/plugin/overlay.cpp
     src/plugin/ui.cpp
     src/plugin/plugin.rc)
-  target_link_libraries(MHWVroidHunter PRIVATE vh_core imgui minhook d3d11 dxgi d3dcompiler_47 comdlg32 ole32 shell32 uuid dwmapi)
+  target_link_libraries(MHWVroidHunter PRIVATE vh_core imgui minhook d3d11 dxgi d3dcompiler_47 ole32 shell32 uuid dwmapi)
   set_target_properties(MHWVroidHunter PROPERTIES PREFIX "")
   target_link_options(MHWVroidHunter PRIVATE -static -static-libgcc -static-libstdc++ -s)
 
@@ -84,15 +86,21 @@ if(WIN32)
   target_compile_definitions(dinput8_proxy PRIVATE UNICODE _UNICODE)
   target_link_options(dinput8_proxy PRIVATE -static -static-libgcc -static-libstdc++ -s)
 
-  # Installer: a single exe that embeds the two DLLs above
+  # Converter: runs outside the game (started by the plugin, installed next to it)
+  add_executable(VRoidHunterConverter WIN32 src/converter/converter.cpp)
+  target_link_libraries(VRoidHunterConverter PRIVATE vh_core shell32)
+  target_link_options(VRoidHunterConverter PRIVATE -static -static-libgcc -static-libstdc++ -municode -s)
+
+  # Installer: a single exe that embeds the DLLs and the converter above
   set(VH_PLUGIN_DLL "${CMAKE_BINARY_DIR}/MHWVroidHunter.dll")
   set(VH_PROXY_DLL "${CMAKE_BINARY_DIR}/dinput8.dll")
+  set(VH_CONVERTER_EXE "${CMAKE_BINARY_DIR}/VRoidHunterConverter.exe")
   set(VH_MANIFEST "${CMAKE_SOURCE_DIR}/src/installer/installer.manifest")
   configure_file(src/installer/installer.rc.in ${CMAKE_BINARY_DIR}/installer.rc @ONLY)
   add_executable(MHWVroidHunterSetup WIN32 src/installer/installer.cpp ${CMAKE_BINARY_DIR}/installer.rc)
   set_source_files_properties(${CMAKE_BINARY_DIR}/installer.rc PROPERTIES
-    OBJECT_DEPENDS "${VH_PLUGIN_DLL};${VH_PROXY_DLL};${VH_MANIFEST}")
-  add_dependencies(MHWVroidHunterSetup MHWVroidHunter dinput8_proxy)
+    OBJECT_DEPENDS "${VH_PLUGIN_DLL};${VH_PROXY_DLL};${VH_CONVERTER_EXE};${VH_MANIFEST}")
+  add_dependencies(MHWVroidHunterSetup MHWVroidHunter dinput8_proxy VRoidHunterConverter)
   target_link_libraries(MHWVroidHunterSetup PRIVATE vh_core comctl32 comdlg32 shell32 ole32 uuid)
   target_link_options(MHWVroidHunterSetup PRIVATE -static -static-libgcc -static-libstdc++ -municode -s)
 

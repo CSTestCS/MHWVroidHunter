@@ -2,7 +2,7 @@
 // dinput8.dll from its own folder like the game does, calls DirectInput8Create, presents frames
 // and saves a screenshot of the back buffer so the overlay can be checked without the game.
 // Build as MonsterHunterWorld.exe and run under Windows or Wine:
-//   MonsterHunterWorld.exe <frames> <screenshot.bmp>
+//   MonsterHunterWorld.exe <frames> <screenshot.bmp> [file that must exist after start-up]
 #include <windows.h>
 #include <d3d11.h>
 
@@ -37,6 +37,8 @@ int main(int argc, char** argv) {
         void* out = nullptr;
         HRESULT hr = create(GetModuleHandleW(nullptr), 0x0800, IID_IDirectInput8W_, &out, nullptr);
         std::printf("DirectInput8Create hr=0x%08lx\n", static_cast<unsigned long>(hr));
+        // optional: check that a converted model file exists once DirectInput8Create returned
+        if (argc > 3) std::printf("model ready after start-up wait: %s\n", GetFileAttributesA(argv[3]) != INVALID_FILE_ATTRIBUTES ? "yes" : "no");
     }
 
     DXGI_SWAP_CHAIN_DESC sd{};

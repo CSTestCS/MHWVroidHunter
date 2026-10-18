@@ -21,13 +21,15 @@
 #include <thread>
 #include <vector>
 
+#include "autoconvert.h"
 #include "builder.h"
+#include "models.h"
 #include "fsutil.h"
 #include "settings.h"
 
 namespace {
 
-enum { IDC_PATH = 101, IDC_BROWSE, IDC_INSTALL, IDC_UNINSTALL, IDC_CHOOSE, IDC_LOG, IDC_ARMOR, IDR_PLUGIN = 201, IDR_PROXY = 202 };
+enum { IDC_PATH = 101, IDC_BROWSE, IDC_INSTALL, IDC_UNINSTALL, IDC_CHOOSE, IDC_LOG, IDC_ARMOR, IDC_FOLDER, IDR_PLUGIN = 201, IDR_PROXY = 202, IDR_CONVERTER = 203 };
 constexpr UINT WM_APP_LOG = WM_APP + 1;
 constexpr UINT WM_APP_DONE = WM_APP + 2;
 constexpr wchar_t kGameExe[] = L"MonsterHunterWorld.exe";
@@ -175,6 +177,9 @@ bool install(const std::wstring& gameW, std::string& error) {
             vh::writeFile(proxy, resourceBytes(IDR_PROXY));
             appendLog("Installed dinput8.dll loader.");
         }
+        vh::writeFile(vh::join(plugins, "MHWVroidHunter/VRoidHunterConverter.exe"), resourceBytes(IDR_CONVERTER));
+        vh::ensureModelsFolder(game);
+        appendLog("Models folder: " + vh::modelsFolder(game));
         std::string settings = vh::join(plugins, "MHWVroidHunter/settings.ini");
         if (!vh::exists(settings)) vh::Settings().save(settings);
         return true;
@@ -190,7 +195,8 @@ void runInstall() {
     setBusy(true);
     std::string err;
     if (install(game, err)) {
-        appendLog(L"Installed! Next: click \"Choose VRoid model...\" (or press F7 in game).");
+        appendLog(L"Installed! Next: put your .vrm file in the \"VRoidHunter\" folder inside the game folder "
+                  L"(button \"Open models folder\"), or click \"2. Add VRoid model...\". Then start the game.");
     } else {
         appendLog("Install failed: " + err);
         if (err.find("ermission") != std::string::npos || err.find("denied") != std::string::npos)
@@ -214,6 +220,7 @@ void doUninstall(const std::wstring& gameW) {
                 if (vh::exists(proxy + ".vhbackup")) std::filesystem::rename(vh::u8(proxy + ".vhbackup"), vh::u8(proxy), ec);
             }
             appendLog(L"Uninstalled. Monster Hunter World is back to normal.");
+            appendLog("Your models in " + vh::modelsFolder(game) + " were kept; delete that folder if you no longer need them.");
         } catch (const std::exception& e) {
             appendLog(std::string("Uninstall failed: ") + e.what());
         }
@@ -254,32 +261,38 @@ void runChooseModel() {
 }
 
 bool doConvert(const std::wstring& gameW, const std::wstring& vrm, bool showArmor) {
-        std::string game = u(gameW);
-        std::string err;
-        if (!vh::exists(vh::join(game, "nativePC/plugins/MHWVroidHunter.dll")) && !install(gameW, err)) {
-            appendLog("Install failed: " + err);
-            return false;
+    std::string game = u(gameW);
+    std::string err;
+    if (!vh::exists(vh::join(game, "nativePC/plugins/MHWVroidHunter.dll")) && !install(gameW, err)) {
+        appendLog("Install failed: " + err);
+        return false;
+    }
+    std::string data = vh::pluginDataDir(game);
+    std::string settingsPath = vh::join(data, "settings.ini");
+    try {
+        // copy the model into the drop folder so the game-side tools see the same file
+        vh::ensureModelsFolder(game);
+        std::filesystem::path src(vrm);
+        std::string dest = vh::join(vh::modelsFolder(game), vh::toU8(src.filename()));
+        if (std::filesystem::absolute(src) != std::filesystem::absolute(vh::u8(dest))) {
+            std::filesystem::copy_file(src, vh::u8(dest), std::filesystem::copy_options::overwrite_existing);
+            appendLog("Copied the model to " + dest);
         }
-        std::string data = vh::join(game, "nativePC/plugins/MHWVroidHunter");
-        std::string settingsPath = vh::join(data, "settings.ini");
         vh::Settings s = vh::Settings::load(settingsPath);
         s.enabled = true;
-        s.vrmPath = u(vrm);
+        s.vrmPath.clear();
+        vh::pickModel(game, s, vh::toU8(src.filename()));
         for (bool& b : s.showArmor) b = showArmor;
-        try {
-            s.save(settingsPath);
-            appendLog(L"Converting the model. The first time this reads the game archives and can take a few minutes...");
-            vh::ModManager mm(vh::join(game, "nativePC"), data, [game, data] {
-                return vh::openArchiveSource(game, vh::join(data, "game_index.cache"), [](const std::string& m) { appendLog(m); });
-            });
-            vh::ApplyResult r = mm.apply(s, [](const std::string& m) { appendLog(m); });
-            if (!r.ok) appendLog("Failed: " + r.message);
-            else appendLog(L"All set! Start the game. Press F7 in game to change settings.");
-            return r.ok;
-        } catch (const std::exception& e) {
-            appendLog(std::string("Failed: ") + e.what());
-            return false;
-        }
+        s.save(settingsPath);
+        appendLog(L"Converting the model. The first time this reads the game archives and can take a few minutes...");
+        vh::JobResult r = vh::runJob(game, vh::JobMode::Apply, [](const std::string& m) { appendLog(m); });
+        if (!r.ok) appendLog("Failed: " + r.message);
+        else appendLog(L"All set! Start the game. Press F7 in game to change settings.");
+        return r.ok;
+    } catch (const std::exception& e) {
+        appendLog(std::string("Failed: ") + e.what());
+        return false;
+    }
 }
 
 void browseFolder() {
@@ -315,9 +328,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_path = make(L"EDIT", findGame().c_str(), WS_BORDER | ES_AUTOHSCROLL, 16, 66, 470, 24, IDC_PATH, WS_EX_CLIENTEDGE);
         make(L"BUTTON", L"Browse...", BS_PUSHBUTTON, 494, 65, 90, 26, IDC_BROWSE);
         g_install = make(L"BUTTON", L"1. Install mod", BS_DEFPUSHBUTTON, 16, 104, 180, 34, IDC_INSTALL);
-        g_choose = make(L"BUTTON", L"2. Choose VRoid model...", BS_PUSHBUTTON, 204, 104, 200, 34, IDC_CHOOSE);
+        g_choose = make(L"BUTTON", L"2. Add VRoid model...", BS_PUSHBUTTON, 204, 104, 200, 34, IDC_CHOOSE);
         g_uninstall = make(L"BUTTON", L"Uninstall", BS_PUSHBUTTON, 412, 104, 172, 34, IDC_UNINSTALL);
-        make(L"BUTTON", L"Show hunter armor on top of the model (can be changed per part in game)", BS_AUTOCHECKBOX, 16, 146, 568, 22, IDC_ARMOR);
+        make(L"BUTTON", L"Open models folder", BS_PUSHBUTTON, 412, 142, 172, 28, IDC_FOLDER);
+        make(L"BUTTON", L"Show hunter armor on top of the model (per part in game)", BS_AUTOCHECKBOX, 16, 146, 390, 22, IDC_ARMOR);
         g_log = make(L"EDIT", L"", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 16, 176, 568, 230, IDC_LOG,
                      WS_EX_CLIENTEDGE);
         if (GetWindowTextLengthW(g_path) == 0)
@@ -333,6 +347,19 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_INSTALL: runInstall(); break;
         case IDC_UNINSTALL: runUninstall(); break;
         case IDC_CHOOSE: runChooseModel(); break;
+        case IDC_FOLDER: {
+            std::wstring game = gameDirFromUi();
+            if (GetFileAttributesW((game + L"\\" + kGameExe).c_str()) == INVALID_FILE_ATTRIBUTES) {
+                MessageBoxW(hwnd, L"Choose the Monster Hunter World folder first.", L"MHW VRoid Hunter", MB_ICONINFORMATION);
+                break;
+            }
+            try {
+                vh::ensureModelsFolder(u(game));
+            } catch (...) {
+            }
+            ShellExecuteW(hwnd, L"open", vh::u8(vh::modelsFolder(u(game))).wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+        }
         }
         return 0;
     case WM_APP_LOG: {

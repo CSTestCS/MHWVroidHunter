@@ -2,7 +2,8 @@
 
 Play **Monster Hunter: World** (Steam) as your own **VRoid / VRM** model.
 
-* Pick a `.vrm` file from an in-game settings menu (**F7**) or from the installer.
+* Drop your `.vrm` file into the **`VRoidHunter` folder** in the game folder; it is converted
+  automatically when the game starts (in a separate process, never inside the game).
 * The model replaces your hunter and is **sized to your hunter's height automatically**.
 * Per armor part (head, chest, arms, waist, legs) you can choose to **show your equipped hunter
   armor**, fitted onto the VRoid body.
@@ -18,17 +19,33 @@ Play **Monster Hunter: World** (Steam) as your own **VRoid / VRM** model.
 ## Install
 
 **Easy:** download the release zip, run `MHWVroidHunterSetup.exe`, click **1. Install mod**,
-then **2. Choose VRoid model...**, then start the game.
+put your `.vrm` into the `VRoidHunter` folder that appears in the game folder (**Open models
+folder** button), then start the game. **2. Add VRoid model...** copies a file into that folder
+and converts it immediately.
 
 **Manual:** copy the contents of `manual-install/` into the folder that contains
 `MonsterHunterWorld.exe`:
 
 ```
-Monster Hunter World\dinput8.dll                         (small loader)
-Monster Hunter World\nativePC\plugins\MHWVroidHunter.dll (the mod)
+Monster Hunter World\dinput8.dll                                              (small loader)
+Monster Hunter World\nativePC\plugins\MHWVroidHunter.dll                      (the mod)
+Monster Hunter World\nativePC\plugins\MHWVroidHunter\VRoidHunterConverter.exe (the converter)
+Monster Hunter World\VRoidHunter\                                             (put your .vrm here)
 ```
 
-If you already use **Stracker's Loader**, copy only the plugin DLL; Stracker's Loader loads it.
+If you already use **Stracker's Loader**, skip `dinput8.dll`; Stracker's Loader loads the plugin.
+In that case the game does not wait for a first-time conversion, so restart it once the
+converter window has closed.
+
+### The drop folder
+
+* Any `.vrm` in `<game>\VRoidHunter\` is picked up when the game starts. If there are several,
+  the **newest** file is used; the F7 menu can switch between them (until a newer file is dropped
+  in).
+* Conversion runs in `VRoidHunterConverter.exe`, a separate process. At start-up our
+  `dinput8.dll` holds the game until it finishes, so the model is ready the first time; a small
+  window shows progress. Unchanged models are skipped in well under a second.
+* You can also run `VRoidHunterConverter.exe --apply` yourself before starting the game.
 
 **Steam Deck / Proton:** set the launch options to `WINEDLLOVERRIDES="dinput8=n,b" %command%`.
 
@@ -42,11 +59,11 @@ Press **F7** in game:
 | Setting | What it does |
 |---|---|
 | Play as my VRoid model | Turns the model swap on or off. |
-| Choose .vrm file... | Picks the model (VRM 0.x and VRM 1.0, e.g. VRoid Studio exports). |
+| Model | Chooses between the `.vrm` files in the `VRoidHunter` folder (VRM 0.x and 1.0). **Open models folder** opens it. |
 | Show armor: Head / Chest / Arms / Waist / Legs | Checked parts show your equipped (or layered) hunter armor, unchecked parts show the VRoid model. |
 | Body fit | 100% (default) moves the VRoid's joints onto the hunter's joints so armor and animations line up. Lower keeps more of the VRoid's own proportions. |
 | Advanced | Male/female hunter, texture size, removal of fully transparent parts. |
-| Apply | Converts the model and installs it. Then change equipment, enter your room or travel so the game reloads your hunter. |
+| Apply | Runs the converter in the background (outside the game). Then change equipment, enter your room or travel so the game reloads your hunter. |
 
 In DirectX 12 mode the menu opens as a separate small window instead of an overlay.
 
@@ -160,8 +177,10 @@ What has been verified without the game:
 * The Windows build was run under Wine: Japanese file paths, hard links, the installer
   (install / convert / uninstall with backup and restore of an existing `dinput8.dll`), and a
   stand-in game (`tests/fakegame`) that loads our `dinput8.dll` like MHW does, where the plugin
-  hooked DirectX 11, drew the menu and converted a model from a fake `chunkG0.bin`
-  (`tests/make_fake_chunk.py`).
+  hooked DirectX 11 and drew the menu. With a model dropped into `VRoidHunter\`, the stand-in
+  game waited at start-up while `VRoidHunterConverter.exe` converted it from a fake `chunkG0.bin`
+  (`tests/make_fake_chunk.py`), the model files existed when the game continued, and the next
+  start skipped the work.
 
 ## License
 

@@ -11,6 +11,7 @@
 
 #include "app.h"
 #include "fsutil.h"
+#include "models.h"
 
 namespace {
 
@@ -38,6 +39,7 @@ bool gameWindowFocused() {
 
 void mainThread() {
     using namespace vhp;
+    SetEvent(startupBegunEvent());
     App& a = app();
     a.gameDir = moduleDir(nullptr);
     a.nativePC = vh::join(a.gameDir, "nativePC");
@@ -53,6 +55,22 @@ void mainThread() {
         if (!vh::exists(a.settingsPath)) a.saveSettings();
     }
     logLine("---- MHW VRoid Hunter started ----");
+
+    // Convert a newly dropped model (or changed settings) before the game loads the hunter.
+    // The converter is a separate process; the dinput8 loader waits for it (see VH_WaitForStartupWork).
+    try {
+        vh::ensureModelsFolder(a.gameDir);
+    } catch (...) {
+    }
+    a.refreshModels();
+    if (a.runConverter("--auto", false)) {
+        std::thread([] {
+            while (app().busy) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            SetEvent(startupDoneEvent());
+        }).detach();
+    } else {
+        SetEvent(startupDoneEvent());
+    }
 
     const bool hooked = installOverlay();
     // Test hook: start with the menu open (used by the automated overlay test harness).
@@ -78,6 +96,8 @@ void mainThread() {
             }
         }
         wasDown = down;
+        static int tick = 0;
+        if (a.menuVisible && !a.busy && ++tick % 100 == 0) a.refreshModels(); // pick up newly dropped files
         if (!hooked && !announcedFallback) {
             announcedFallback = true;
             logLine("Press the hotkey in game to open the settings window.");
@@ -87,6 +107,14 @@ void mainThread() {
 }
 
 } // namespace
+
+// Called by our dinput8.dll loader from the game's first DirectInput8Create call, so the game
+// waits until a newly dropped model has been converted. Returns TRUE if the work finished.
+extern "C" __declspec(dllexport) BOOL WINAPI VH_WaitForStartupWork(DWORD timeoutMs) {
+    // never block the game if our start-up thread could not even start
+    if (WaitForSingleObject(vhp::startupBegunEvent(), 10000) != WAIT_OBJECT_0) return FALSE;
+    return WaitForSingleObject(vhp::startupDoneEvent(), timeoutMs) == WAIT_OBJECT_0;
+}
 
 extern "C" BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -100,6 +128,8 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
             CloseHandle(mtx);
             return TRUE;
         }
+        vhp::startupDoneEvent(); // create them before anybody can wait on them
+        vhp::startupBegunEvent();
         CloseHandle(CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
             mainThread();
             return 0;

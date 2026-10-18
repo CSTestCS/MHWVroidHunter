@@ -43,6 +43,8 @@ Settings Settings::load(const std::string& path) {
     };
     if (auto v = get("enabled")) s.enabled = toBool(*v);
     if (auto v = get("vrm_path")) s.vrmPath = *v;
+    if (auto v = get("model")) s.modelName = *v;
+    if (auto v = get("model_picked_time")) s.modelPickedNewest = std::strtoll(v->c_str(), nullptr, 10);
     for (int i = 0; i < kSlotCount; ++i) {
         std::string key = std::string("show_armor_") + slotFolder(Slot(i));
         if (auto v = get(key.c_str())) s.showArmor[i] = toBool(*v);
@@ -58,9 +60,12 @@ Settings Settings::load(const std::string& path) {
 
 void Settings::save(const std::string& path) const {
     std::ostringstream o;
-    o << "# MHW VRoid Hunter settings (edit in game with the hotkey, default F7)\n";
+    o << "# MHW VRoid Hunter settings (edit in game with the hotkey, default F7).\n";
+    o << "# Put your .vrm file in the \"VRoidHunter\" folder next to MonsterHunterWorld.exe.\n";
     o << "enabled=" << (enabled ? 1 : 0) << "\n";
     o << "vrm_path=" << vrmPath << "\n";
+    o << "model=" << modelName << "\n";
+    o << "model_picked_time=" << modelPickedNewest << "\n";
     for (int i = 0; i < kSlotCount; ++i) o << "show_armor_" << slotFolder(Slot(i)) << "=" << (showArmor[i] ? 1 : 0) << "\n";
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.3f", conform);

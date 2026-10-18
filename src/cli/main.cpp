@@ -1,5 +1,6 @@
 // vroidhunter-cli: offline tools for MHW VRoid Hunter.
 //
+//   vroidhunter-cli auto    --game <MHW folder>   (convert the newest .vrm in <game>/VRoidHunter)
 //   vroidhunter-cli apply   --game <MHW folder> --vrm <file.vrm> [options]
 //   vroidhunter-cli convert --templates <extracted chunk folder> --out <nativePC> --vrm <file.vrm> [options]
 //   vroidhunter-cli remove  --game <MHW folder>
@@ -18,6 +19,7 @@
 
 #include <stb_image_write.h>
 
+#include "autoconvert.h"
 #include "binio.h"
 #include "builder.h"
 #include "chunk.h"
@@ -238,6 +240,14 @@ int realMain(const std::vector<std::string>& argv) {
         for (auto& f : files) std::printf("%s\t%llu\n", f.path.c_str(), (unsigned long long)f.size);
         std::printf("%zu files\n", files.size());
         return 0;
+    }
+    if (a.cmd == "auto") {
+        // same as the game does at start-up: convert whatever is in <game>/VRoidHunter
+        std::string game = a.get("game");
+        if (game.empty()) throw std::runtime_error("--game <Monster Hunter World folder> is required");
+        JobResult r = runJob(game, JobMode::Auto, [](const std::string& m) { std::cout << m << "\n"; });
+        std::cout << (r.ok ? "OK: " : "FAILED: ") << r.message << "\n";
+        return r.ok ? 0 : 1;
     }
     if (a.cmd == "apply" || a.cmd == "remove") {
         std::string game = a.get("game");

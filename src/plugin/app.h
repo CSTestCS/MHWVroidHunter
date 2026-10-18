@@ -24,16 +24,28 @@ struct App {
     std::vector<std::string> log;
     bool dirty = false;       // settings changed since the last apply
 
-    std::atomic<bool> busy{false};
+    std::vector<std::string> models; // .vrm files in the drop folder, newest first (refreshed in the background)
+    std::string activeModel;         // file the converter will use
+
+    std::atomic<bool> busy{false};   // the converter process is running
     std::atomic<bool> menuVisible{false};
     std::atomic<bool> overlayActive{false}; // the in-game (DX11) overlay is drawing frames
 
-    void saveSettings();
+    void saveSettings();             // caller holds `mutex`
+    // Run VRoidHunterConverter.exe ("--auto", "--apply" or "--remove") in its own process and
+    // follow its progress. The game itself never converts anything.
+    bool runConverter(const char* mode, bool hidden);
     void startApply();
     void startRemove();
-    void chooseVrmFile();
+    void openModelsFolder();
+    void refreshModels();
     void setStatus(const std::string& s);
 };
+
+// Signalled once the start-up conversion (if any) has finished.
+HANDLE startupDoneEvent();
+// Signalled as soon as the plugin's start-up thread is running.
+HANDLE startupBegunEvent();
 
 App& app();
 void logLine(const std::string& line);

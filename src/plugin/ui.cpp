@@ -1,5 +1,4 @@
 #include <windows.h>
-#include <commdlg.h>
 #include <imgui.h>
 
 #include <chrono>
@@ -7,7 +6,8 @@
 #include <thread>
 
 #include "app.h"
-#include "builder.h"
+#include "autoconvert.h"
+#include "models.h"
 #include "fsutil.h"
 
 namespace vhp {
@@ -48,76 +48,113 @@ void App::saveSettings() {
     }
 }
 
-static vh::ModManager makeManager(App& a) {
-    std::string game = a.gameDir, data = a.dataDir;
-    return vh::ModManager(a.nativePC, a.dataDir, [game, data] {
-        return vh::openArchiveSource(game, vh::join(data, "game_index.cache"), [](const std::string& m) { app().setStatus(m); });
-    });
+HANDLE startupDoneEvent() {
+    static HANDLE h = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    return h;
+}
+
+HANDLE startupBegunEvent() {
+    static HANDLE h = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    return h;
+}
+
+bool App::runConverter(const char* mode, bool hidden) {
+    if (busy.exchange(true)) return false;
+    const std::string exe = vh::join(dataDir, "VRoidHunterConverter.exe");
+    if (!vh::exists(exe)) {
+        setStatus("VRoidHunterConverter.exe is missing from nativePC\\plugins\\MHWVroidHunter. Please reinstall the mod.");
+        busy = false;
+        return false;
+    }
+    std::wstring cmd = L"\"" + vh::u8(exe).wstring() + L"\" " + vh::u8(mode).wstring() + L" \"" + vh::u8(gameDir).wstring() + L"\"";
+    if (hidden) cmd += L" --hidden";
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, nullptr,
+                        vh::u8(dataDir).wstring().c_str(), &si, &pi)) {
+        setStatus("Could not start VRoidHunterConverter.exe (error " + std::to_string(GetLastError()) + ").");
+        busy = false;
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    const std::string statusFile = vh::join(dataDir, "converter_status.txt");
+    std::thread([this, pi, statusFile] {
+        std::string lastShown;
+        auto poll = [&] {
+            std::string last;
+            try {
+                auto raw = vh::readFile(statusFile);
+                std::string text(raw.begin(), raw.end());
+                while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+                size_t nl = text.find_last_of('\n');
+                last = nl == std::string::npos ? text : text.substr(nl + 1);
+            } catch (...) {
+            }
+            if (last.rfind("#DONE ", 0) == 0) {
+                bool ok = last.size() > 6 && last[6] == '1';
+                last = (ok ? "" : "Failed: ") + last.substr(std::min<size_t>(last.size(), 8));
+            }
+            if (!last.empty() && last != lastShown) {
+                lastShown = last;
+                setStatus(last);
+            }
+        };
+        while (WaitForSingleObject(pi.hProcess, 400) == WAIT_TIMEOUT) poll();
+        poll();
+        DWORD code = 1;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hProcess);
+        logLine("converter finished with code " + std::to_string(code));
+        busy = false;
+        refreshModels();
+    }).detach();
+    return true;
 }
 
 void App::startApply() {
-    if (busy.exchange(true)) return;
-    vh::Settings snapshot;
     {
         std::lock_guard<std::mutex> lk(mutex);
-        snapshot = settings;
         dirty = false;
         saveSettings();
     }
-    std::thread([this, snapshot] {
-        setStatus("Working... the game may stutter for a moment.");
-        try {
-            vh::ModManager mm = makeManager(*this);
-            vh::ApplyResult r = mm.apply(snapshot, [this](const std::string& m) { setStatus(m); });
-            setStatus(r.ok ? r.message : "Failed: " + r.message);
-        } catch (const std::exception& e) {
-            setStatus(std::string("Failed: ") + e.what());
-        }
-        busy = false;
-    }).detach();
+    if (runConverter("--apply", true)) setStatus("Converting in the background - you can keep playing.");
 }
 
 void App::startRemove() {
-    if (busy.exchange(true)) return;
     {
         std::lock_guard<std::mutex> lk(mutex);
         settings.enabled = false;
         saveSettings();
     }
-    std::thread([this] {
-        try {
-            vh::ModManager mm = makeManager(*this);
-            setStatus(mm.removeAll().message);
-        } catch (const std::exception& e) {
-            setStatus(std::string("Failed: ") + e.what());
-        }
-        busy = false;
-    }).detach();
+    runConverter("--remove", true);
 }
 
-void App::chooseVrmFile() {
-    // The file dialog blocks, so it runs on its own thread.
-    std::thread([this] {
-        wchar_t file[MAX_PATH * 4] = L"";
-        OPENFILENAMEW ofn{};
-        ofn.lStructSize = sizeof(ofn);
-        ofn.lpstrFilter = L"VRoid / VRM model (*.vrm)\0*.vrm\0All files\0*.*\0";
-        ofn.lpstrFile = file;
-        ofn.nMaxFile = MAX_PATH * 4;
-        ofn.lpstrTitle = L"Choose your VRoid model";
-        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
-        if (GetOpenFileNameW(&ofn)) {
-            std::string path = vh::toU8(std::filesystem::path(file));
-            {
-                std::lock_guard<std::mutex> lk(mutex);
-                settings.vrmPath = path;
-                settings.enabled = true;
-                dirty = true;
-                saveSettings();
-            }
-            setStatus("Model selected. Press \"Apply\" to convert it.");
-        }
-    }).detach();
+void App::openModelsFolder() {
+    try {
+        vh::ensureModelsFolder(gameDir);
+    } catch (...) {
+    }
+    // Start Explorer as its own process (no shell dialogs inside the game process).
+    std::wstring cmd = L"explorer.exe \"" + vh::u8(vh::modelsFolder(gameDir)).wstring() + L"\"";
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+}
+
+void App::refreshModels() {
+    std::vector<std::string> names;
+    for (auto& m : vh::listModels(gameDir)) names.push_back(m.name);
+    std::lock_guard<std::mutex> lk(mutex);
+    models = names;
+    std::string active = vh::resolveModel(gameDir, settings);
+    activeModel = active.empty() ? "" : vh::toU8(vh::u8(active).filename());
 }
 
 void setupFonts(float size) {
@@ -171,11 +208,31 @@ void drawSettingsUI(bool standalone) {
     changed |= ImGui::Checkbox("Play as my VRoid model", &s.enabled);
 
     ImGui::SeparatorText("Model");
-    std::string shown = s.vrmPath.empty() ? std::string("(no model chosen)") : std::filesystem::path(vh::u8(s.vrmPath)).filename().u8string();
-    ImGui::TextUnformatted(shown.c_str());
-    if (!s.vrmPath.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", s.vrmPath.c_str());
+    ImGui::TextWrapped("Put your .vrm file in the \"VRoidHunter\" folder inside the game folder.");
+    if (ImGui::Button("Open models folder")) a.openModelsFolder();
     ImGui::SameLine();
-    if (ImGui::Button("Choose .vrm file...")) a.chooseVrmFile();
+    if (ImGui::Button("Refresh list")) {
+        a.mutex.unlock();
+        a.refreshModels();
+        a.mutex.lock();
+    }
+    if (a.models.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "No .vrm file found in the folder yet.");
+    } else {
+        const std::string preview = a.activeModel.empty() ? std::string("(choose)") : a.activeModel;
+        if (ImGui::BeginCombo("Model", preview.c_str())) {
+            for (size_t i = 0; i < a.models.size(); ++i) {
+                const std::string& name = a.models[i];
+                std::string label = i == 0 ? name + "  (newest)" : name;
+                if (ImGui::Selectable(label.c_str(), name == a.activeModel)) {
+                    vh::pickModel(a.gameDir, s, name);
+                    a.activeModel = name;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
     ImGui::TextDisabled("The model is resized to your hunter's height automatically.");
 
     ImGui::SeparatorText("Hunter armor");

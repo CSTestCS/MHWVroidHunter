@@ -17,7 +17,9 @@
 #include <vector>
 
 #include "binio.h"
+#include "autoconvert.h"
 #include "builder.h"
+#include "models.h"
 #include "chunk.h"
 #include "fsutil.h"
 #include "hunter.h"
@@ -642,6 +644,49 @@ static void testChunk() {
     CHECK(k0[0] == 0xac && k1[0] == 0x6b && chunkKeyForBlock(2)[0] == 0x8f && chunkKeyForBlock(3)[0] == 0xda);
 }
 
+static void testDropFolder(const std::string& vrm0, const std::string& vrm1) {
+    std::puts("drop folder + converter job");
+    std::string game = tmpDir("dropgame");
+    std::string src = tmpDir("drop_src");
+    writeGameFixture(src);
+    auto factory = [&] { return openFolderSource(src); };
+    // nothing in the folder yet
+    JobResult r = runJob(game, JobMode::Auto, nullptr, factory);
+    CHECK(r.ok && !r.didWork);
+    CHECK(exists(modelsFolder(game) + "/PUT YOUR .VRM FILE HERE.txt"));
+    // drop a model: picked up automatically
+    std::filesystem::copy_file(vrm0, modelsFolder(game) + "/first.vrm");
+    r = runJob(game, JobMode::Auto, nullptr, factory);
+    CHECK(r.ok && r.didWork);
+    const std::string body = game + "/nativePC/pl/f_equip/pl001_0000/body/mod/f_body001_0000.mod3";
+    CHECK(exists(body));
+    // second start without changes: no work
+    r = runJob(game, JobMode::Auto, nullptr, factory);
+    CHECK(r.ok && !r.didWork);
+    // a newer file wins
+    std::filesystem::copy_file(vrm1, modelsFolder(game) + "/second.vrm");
+    std::filesystem::last_write_time(modelsFolder(game) + "/second.vrm",
+                                     std::filesystem::last_write_time(modelsFolder(game) + "/first.vrm") + std::chrono::seconds(10));
+    Settings s = Settings::load(pluginDataDir(game) + "/settings.ini");
+    CHECK(resolveModel(game, s).find("second.vrm") != std::string::npos);
+    r = runJob(game, JobMode::Auto, nullptr, factory);
+    CHECK(r.ok && r.didWork);
+    // picking the older one in the menu sticks until a newer file is dropped
+    pickModel(game, s, "first.vrm");
+    s.save(pluginDataDir(game) + "/settings.ini");
+    CHECK(resolveModel(game, s).find("first.vrm") != std::string::npos);
+    r = runJob(game, JobMode::Auto, nullptr, factory);
+    CHECK(r.ok && r.didWork);
+    // turning the mod off removes the files
+    s.enabled = false;
+    s.save(pluginDataDir(game) + "/settings.ini");
+    r = runJob(game, JobMode::Auto, nullptr, factory);
+    CHECK(r.ok && !exists(body));
+    CHECK(exists(modelsFolder(game) + "/first.vrm")); // user files are never touched
+    r = runJob(game, JobMode::Remove, nullptr, factory);
+    CHECK(r.ok);
+}
+
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
@@ -655,6 +700,7 @@ int main(int argc, char** argv) {
         testRetarget(v0, v1);
         testChunk();
         testBuilder(v1);
+        testDropFolder(v0, v1);
         if (const char* real = std::getenv("VH_TEST_VRM")) {
             std::printf("builder with %s\n", real);
             testBuilder(real);
