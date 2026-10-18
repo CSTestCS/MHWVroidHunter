@@ -1,0 +1,41 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ mingw-w64 zip
+
+      - name: Build, test and package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then VERSION="dev-${GITHUB_SHA::7}"; fi
+          scripts/package.sh "$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: MHWVroidHunter-${{ env.VERSION }}
+          path: dist/MHWVroidHunter-${{ env.VERSION }}/
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/MHWVroidHunter-${{ env.VERSION }}.zip

@@ -1,0 +1,26 @@
+#include <winver.h>
+#include <winuser.h>
+
+1 RT_MANIFEST "@VH_MANIFEST@"
+201 RCDATA "@VH_PLUGIN_DLL@"
+202 RCDATA "@VH_PROXY_DLL@"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "FileDescription", "MHW VRoid Hunter setup"
+      VALUE "ProductName", "MHW VRoid Hunter"
+      VALUE "FileVersion", "1.0.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
