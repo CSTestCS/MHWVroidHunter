@@ -24,6 +24,8 @@
 #include "autoconvert.h"
 #include "builder.h"
 #include "models.h"
+#include "procutil.h"
+#include "version.h"
 #include "fsutil.h"
 #include "settings.h"
 
@@ -177,7 +179,10 @@ bool install(const std::wstring& gameW, std::string& error) {
             vh::writeFile(proxy, resourceBytes(IDR_PROXY));
             appendLog("Installed dinput8.dll loader.");
         }
+        // an old converter that is still running keeps its exe locked; end it so it can be replaced
+        if (int n = vh::endStaleConverters()) appendLog("Closed " + std::to_string(n) + " running old converter process(es).");
         vh::writeFile(vh::join(plugins, "MHWVroidHunter/VRoidHunterConverter.exe"), resourceBytes(IDR_CONVERTER));
+        appendLog("Installed version " VH_VERSION);
         vh::ensureModelsFolder(game);
         appendLog("Models folder: " + vh::modelsFolder(game));
         std::string settings = vh::join(plugins, "MHWVroidHunter/settings.ini");

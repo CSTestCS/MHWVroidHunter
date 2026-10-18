@@ -8,6 +8,8 @@
 #include "app.h"
 #include "autoconvert.h"
 #include "models.h"
+#include "procutil.h"
+#include "version.h"
 #include "fsutil.h"
 
 namespace vhp {
@@ -66,7 +68,16 @@ bool App::runConverter(const char* mode, bool hidden) {
         busy = false;
         return false;
     }
-    std::wstring cmd = L"\"" + vh::u8(exe).wstring() + L"\" " + vh::u8(mode).wstring() + L" \"" + vh::u8(gameDir).wstring() + L"\"";
+    // A converter still running from an earlier session (or an older version) would block this
+    // run and could report old results; end it first.
+    if (int n = vh::endStaleConverters()) logLine("ended " + std::to_string(n) + " old converter process(es)");
+
+    // Each run gets an id; status lines from any other run (e.g. an old file) are ignored.
+    const std::string statusFile = vh::join(dataDir, "converter_status.txt");
+    vh::removeFile(statusFile);
+    const std::string runId = std::to_string(GetTickCount64());
+    std::wstring cmd = L"\"" + vh::u8(exe).wstring() + L"\" " + vh::u8(mode).wstring() + L" \"" + vh::u8(gameDir).wstring() +
+                       L"\" --run " + vh::u8(runId).wstring();
     if (hidden) cmd += L" --hidden";
     STARTUPINFOW si{sizeof(si)};
     PROCESS_INFORMATION pi{};
@@ -79,20 +90,29 @@ bool App::runConverter(const char* mode, bool hidden) {
         return false;
     }
     CloseHandle(pi.hThread);
-    const std::string statusFile = vh::join(dataDir, "converter_status.txt");
-    std::thread([this, pi, statusFile] {
-        std::string lastShown;
+    std::thread([this, pi, statusFile, runId] {
+        std::string lastShown, version;
+        bool sawDone = false, ourRun = false;
         auto poll = [&] {
-            std::string last;
+            std::string text;
             try {
                 auto raw = vh::readFile(statusFile);
-                std::string text(raw.begin(), raw.end());
-                while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
-                size_t nl = text.find_last_of('\n');
-                last = nl == std::string::npos ? text : text.substr(nl + 1);
+                text.assign(raw.begin(), raw.end());
             } catch (...) {
+                return;
             }
+            // first line: "#VERSION <v> RUN <id>"
+            size_t firstEnd = text.find('\n');
+            std::string first = text.substr(0, firstEnd);
+            if (first.find("RUN " + runId) == std::string::npos) return; // not written by this run
+            ourRun = true;
+            if (first.rfind("#VERSION ", 0) == 0) version = first.substr(9, first.find(' ', 9) - 9);
+            while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+            size_t nl = text.find_last_of('\n');
+            std::string last = nl == std::string::npos ? text : text.substr(nl + 1);
+            if (last.rfind("#VERSION", 0) == 0) return;
             if (last.rfind("#DONE ", 0) == 0) {
+                sawDone = true;
                 bool ok = last.size() > 6 && last[6] == '1';
                 last = (ok ? "" : "Failed: ") + last.substr(std::min<size_t>(last.size(), 8));
             }
@@ -106,7 +126,19 @@ bool App::runConverter(const char* mode, bool hidden) {
         DWORD code = 1;
         GetExitCodeProcess(pi.hProcess, &code);
         CloseHandle(pi.hProcess);
-        logLine("converter finished with code " + std::to_string(code));
+        logLine("converter finished with code " + std::to_string(code) + (version.empty() ? "" : " (version " + version + ")"));
+        if (!ourRun) {
+            setStatus("The converter did not report anything. It is probably an old version: run the latest "
+                      "MHWVroidHunterSetup.exe -> \"1. Install mod\" again.");
+        } else if (version != VH_VERSION) {
+            setStatus("VRoidHunterConverter.exe is version " + version + " but the plugin is " VH_VERSION
+                      ". Run the latest MHWVroidHunterSetup.exe -> \"1. Install mod\" again.");
+        } else if (!sawDone) {
+            char b[160];
+            std::snprintf(b, sizeof(b), "The converter stopped unexpectedly (code 0x%08lX). Details: converter_status.txt",
+                          static_cast<unsigned long>(code));
+            setStatus(b);
+        }
         busy = false;
         refreshModels();
     }).detach();

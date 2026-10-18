@@ -19,6 +19,8 @@
 
 #include "autoconvert.h"
 #include "fsutil.h"
+#include "procutil.h"
+#include "version.h"
 
 namespace {
 
@@ -32,6 +34,21 @@ bool g_hidden = false;
 std::string g_statusPath;
 std::mutex g_statusMutex;
 std::wstring g_title = L"VRoid Hunter";
+std::string g_runId = "manual";
+std::string g_lastStep = "starting";
+
+// Last words if something goes badly wrong (e.g. unreadable game data): the plugin shows them.
+LONG WINAPI crashFilter(EXCEPTION_POINTERS* info) {
+    char b[300];
+    std::snprintf(b, sizeof(b), "#DONE 0 The converter crashed (exception 0x%08lX) while: %s",
+                  static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode), g_lastStep.c_str());
+    std::FILE* f = _wfopen(vh::u8(g_statusPath).wstring().c_str(), L"ab");
+    if (f) {
+        std::fprintf(f, "%s\n", b);
+        std::fclose(f);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
 
 std::wstring w(const std::string& s) { return vh::u8(s).wstring(); }
 
@@ -109,6 +126,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         else if (a == L"--apply") mode = vh::JobMode::Apply;
         else if (a == L"--remove") mode = vh::JobMode::Remove;
         else if (a == L"--hidden") g_hidden = true;
+        else if (a == L"--run" && i + 1 < argc) g_runId = vh::toU8(std::filesystem::path(argv[++i]));
         else game = vh::toU8(std::filesystem::path(a));
     }
     if (game.empty()) game = gameDirFromExe();
@@ -126,17 +144,26 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     HANDLE mtx = CreateMutexW(nullptr, FALSE, L"Local\\VRoidHunterConverter");
     if (mtx) WaitForSingleObject(mtx, INFINITE);
 
-    writeStatus("Starting...", true);
+    writeStatus(std::string("#VERSION " VH_VERSION " RUN ") + g_runId, true);
+    writeStatus("Game folder: " + game);
+    SetUnhandledExceptionFilter(crashFilter);
     // make sure the thread has a message queue before the worker posts to it
     MSG msg;
     PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
 
     std::atomic<bool> ok{false};
     std::thread worker([&] {
-        vh::JobResult r = vh::runJob(game, mode, [](const std::string& m) {
+        vh::JobResult r;
+        try {
+            r = vh::runJob(game, mode, [](const std::string& m) {
+            g_lastStep = m;
             writeStatus(m);
             post(WM_APP_LOG, m);
         });
+        } catch (const std::exception& e) {
+            r.ok = false;
+            r.message = e.what();
+        }
         ok = r.ok;
         writeStatus(std::string("#DONE ") + (r.ok ? "1 " : "0 ") + r.message);
         post(WM_APP_DONE, r.message);

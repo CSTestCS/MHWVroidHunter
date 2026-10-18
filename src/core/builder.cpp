@@ -331,6 +331,11 @@ std::unique_ptr<GameSource> openCachedGameData(const std::string& gameDir, const
     // list of armour paths. Afterwards the (huge) archives are never opened again.
     if (progress) progress("One-time setup: reading hunter data from the game files...");
     const auto t0 = std::chrono::steady_clock::now();
+    {
+        std::string list;
+        for (auto& a : GameArchives::findArchives(gameDir)) list += "\n  " + a;
+        if (progress) progress("Game archives found:" + (list.empty() ? std::string(" none") : list));
+    }
     ArchiveSource arch(gameDir, "", progress);
     std::vector<std::string> files = arch.list();
     std::map<char, GenderSets> sets = collectSets(files);
@@ -593,8 +598,13 @@ bool ModManager::buildModel(const Settings& s, GameSource& src, const std::vecto
         unsigned workers = std::max(1u, std::min(std::thread::hardware_concurrency(), 8u));
         for (unsigned t = 0; t < workers; ++t)
             pool.emplace_back([&] {
-                for (size_t i; (i = next++) < vrm.materials.size();)
-                    encoded[i] = buildTex(bakeAlbedo(vrm, vrm.materials[i], s.maxTextureSize), TEX_BC1_UNORM_SRGB, true);
+                for (size_t i; (i = next++) < vrm.materials.size();) {
+                    try {
+                        encoded[i] = buildTex(bakeAlbedo(vrm, vrm.materials[i], s.maxTextureSize), TEX_BC1_UNORM_SRGB, true);
+                    } catch (...) { // never let an exception escape a thread (that would end the process)
+                        encoded[i] = buildTex(Image::solid(4, 4, 255, 255, 255, 255), TEX_BC1_UNORM_SRGB, true);
+                    }
+                }
             });
         for (auto& t : pool) t.join();
         for (size_t i = 0; i < vrm.materials.size(); ++i) {

@@ -339,7 +339,18 @@ GameArchives::GameArchives(const std::string& gameDir) : gameDir_(gameDir) {
     archivePaths_ = findArchives(gameDir);
     if (archivePaths_.empty()) {
         std::string where;
-        for (auto& d : searchFolders(gameDir)) where += "\n  " + d;
+        for (auto& d : searchFolders(gameDir)) {
+            where += "\n  " + d;
+            if (d == gameDir) continue;
+            // show what is actually there, so an unexpected naming scheme is easy to spot
+            std::error_code ec;
+            int shown = 0;
+            for (auto& e : std::filesystem::directory_iterator(u8(d), ec)) {
+                if (shown++ == 8) { where += " ..."; break; }
+                where += (shown == 1 ? " contains: " : ", ") + toU8(e.path().filename());
+            }
+            if (!shown) where += " (empty)";
+        }
         throw std::runtime_error("No chunk*.bin game archives were found. Searched:" + where +
                                  "\nIs this the Monster Hunter World folder?");
     }
